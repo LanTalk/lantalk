@@ -29,6 +29,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
@@ -76,6 +77,7 @@ type peerRow struct {
 	Key      string
 	Title    string
 	Subtitle string
+	Unread   int
 }
 
 type discoveryPacket struct {
@@ -124,6 +126,44 @@ type historyLine struct {
 
 type oldQQTheme struct{}
 
+type chatInput struct {
+	widget.Entry
+	onSend    func()
+	shiftHeld bool
+}
+
+func newChatInput(onSend func()) *chatInput {
+	e := &chatInput{onSend: onSend}
+	e.MultiLine = true
+	e.Wrapping = fyne.TextWrapWord
+	e.ExtendBaseWidget(e)
+	return e
+}
+
+func (e *chatInput) KeyDown(key *fyne.KeyEvent) {
+	if key != nil && (key.Name == desktop.KeyShiftLeft || key.Name == desktop.KeyShiftRight) {
+		e.shiftHeld = true
+	}
+	e.Entry.KeyDown(key)
+}
+
+func (e *chatInput) KeyUp(key *fyne.KeyEvent) {
+	if key != nil && (key.Name == desktop.KeyShiftLeft || key.Name == desktop.KeyShiftRight) {
+		e.shiftHeld = false
+	}
+	e.Entry.KeyUp(key)
+}
+
+func (e *chatInput) TypedKey(key *fyne.KeyEvent) {
+	if key != nil && (key.Name == fyne.KeyReturn || key.Name == fyne.KeyEnter) && !e.shiftHeld {
+		if e.onSend != nil {
+			e.onSend()
+		}
+		return
+	}
+	e.Entry.TypedKey(key)
+}
+
 func (oldQQTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNamePrimary:
@@ -151,6 +191,7 @@ type appState struct {
 	cfg            config
 	mu             sync.Mutex
 	peers          map[string]*peer
+	unread         map[string]int
 	peerRows       []peerRow
 	peerFilter     string
 	activeKey      string
@@ -167,8 +208,9 @@ type appState struct {
 	topInfo        *widget.Label
 	chatHeader     *widget.Label
 	chatSubHeader  *widget.Label
-	chatView       *widget.Entry
-	inputBox       *widget.Entry
+	chatStream     *fyne.Container
+	chatScroll     *container.Scroll
+	inputBox       *chatInput
 	statusBar      *widget.Label
 	headerAvatar   *canvas.Image
 	settingsAvatar *canvas.Image
@@ -183,6 +225,7 @@ func newApp(baseDir string) *appState {
 		profileDir:   filepath.Join(baseDir, "data", "profile"),
 		instanceID:   randomID(4),
 		peers:        map[string]*peer{},
+		unread:       map[string]int{},
 		stopCh:       make(chan struct{}),
 	}
 }
@@ -309,7 +352,13 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 			}
 			a.mu.Unlock()
 			c := obj.(*fyne.Container)
+			icon := c.Objects[0].(*widget.Icon)
 			textCol := c.Objects[1].(*fyne.Container)
+			if row.Unread > 0 {
+				icon.SetResource(theme.MailComposeIcon())
+			} else {
+				icon.SetResource(theme.AccountIcon())
+			}
 			textCol.Objects[0].(*widget.Label).SetText(row.Title)
 			textCol.Objects[1].(*widget.Label).SetText(row.Subtitle)
 		},
@@ -329,14 +378,13 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	a.chatSubHeader = widget.NewLabel("")
 	remarkBtn := widget.NewButtonWithIcon("备注", theme.DocumentCreateIcon(), func() { a.openRemarkDialog() })
 
-	a.chatView = widget.NewMultiLineEntry()
-	a.chatView.Disable()
-	a.chatView.Wrapping = fyne.TextWrapWord
-	a.chatView.SetMinRowsVisible(18)
+	a.chatStream = container.NewVBox()
+	a.chatScroll = container.NewVScroll(a.chatStream)
+	a.chatScroll.Direction = container.ScrollVerticalOnly
 
-	a.inputBox = widget.NewMultiLineEntry()
-	a.inputBox.Wrapping = fyne.TextWrapWord
+	a.inputBox = newChatInput(func() { a.sendCurrentText() })
 	a.inputBox.SetMinRowsVisible(6)
+	a.inputBox.SetPlaceHolder("输入消息")
 
 	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
 		a.broadcastHello(a.listenPort)
@@ -356,7 +404,7 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 		layout.NewSpacer(),
 		remarkBtn,
 	)
-	chatSplit := container.NewVSplit(a.chatView, a.inputBox)
+	chatSplit := container.NewVSplit(a.chatScroll, a.inputBox)
 	chatSplit.Offset = 0.78
 	actions := container.NewHBox(refreshBtn, emojiBtn, imageBtn, fileBtn, clearBtn, layout.NewSpacer(), sendBtn)
 	rightCard := widget.NewCard("", "", container.NewBorder(headerRow, container.NewVBox(actions, a.statusBar), nil, nil, chatSplit))
@@ -571,6 +619,32 @@ func (a *appState) setRemark(userID, remark string) {
 	_ = a.saveConfig()
 }
 
+func (a *appState) bumpUnread(peerKey string) {
+	a.mu.Lock()
+	if a.activeKey == peerKey {
+		a.mu.Unlock()
+		return
+	}
+	if a.unread == nil {
+		a.unread = map[string]int{}
+	}
+	a.unread[peerKey]++
+	a.mu.Unlock()
+	a.refreshContacts()
+}
+
+func (a *appState) clearUnread(peerKey string) {
+	a.mu.Lock()
+	_, ok := a.unread[peerKey]
+	if ok {
+		delete(a.unread, peerKey)
+	}
+	a.mu.Unlock()
+	if ok {
+		a.refreshContacts()
+	}
+}
+
 func (a *appState) displayNameForPeer(p *peer) string {
 	if p == nil {
 		return ""
@@ -669,6 +743,8 @@ func (a *appState) handleChat(host string, env chatEnvelope) {
 	}
 	line := historyLine{Direction: "in", From: a.displayNameForPeer(&peer{ID: env.FromID, Name: env.FromName}), Text: payload.Text, SentAt: payload.SentAt}
 	a.appendHistory(peerKey, line)
+	a.bumpUnread(peerKey)
+	a.pushStatus("新消息 · " + line.From)
 	a.refreshChatIfActive(peerKey)
 }
 
@@ -777,6 +853,8 @@ func (a *appState) handleFileStream(reader *bufio.Reader, host string, env chatE
 	displayFrom := a.displayNameForPeer(&peer{ID: env.FromID, Name: env.FromName})
 	msg := fmt.Sprintf("%s %s (%s) -> %s", label, name, humanSize(received), rel)
 	a.appendHistory(peerKey, historyLine{Direction: "in", From: displayFrom, Text: msg, SentAt: meta.SentAt})
+	a.bumpUnread(peerKey)
+	a.pushStatus("新消息 · " + displayFrom)
 	a.refreshChatIfActive(peerKey)
 }
 
@@ -1190,6 +1268,10 @@ func (a *appState) refreshContacts() {
 	for _, p := range a.peers {
 		pairs = append(pairs, p)
 	}
+	unread := make(map[string]int, len(a.unread))
+	for k, v := range a.unread {
+		unread[k] = v
+	}
 	filter := strings.ToLower(strings.TrimSpace(a.peerFilter))
 	a.mu.Unlock()
 
@@ -1206,11 +1288,16 @@ func (a *appState) refreshContacts() {
 	for _, p := range pairs {
 		title := a.displayNameForPeer(p)
 		sub := fmt.Sprintf("%s:%d · %s", p.Addr, p.Port, shortID(p.ID))
+		unreadCount := unread[p.Key]
+		if unreadCount > 0 {
+			title = fmt.Sprintf("%s (%d)", title, unreadCount)
+			sub = "有新消息 · " + sub
+		}
 		probe := strings.ToLower(title + " " + sub)
 		if filter != "" && !strings.Contains(probe, filter) {
 			continue
 		}
-		rows = append(rows, peerRow{Key: p.Key, Title: title, Subtitle: sub})
+		rows = append(rows, peerRow{Key: p.Key, Title: title, Subtitle: sub, Unread: unreadCount})
 	}
 
 	a.mu.Lock()
@@ -1236,6 +1323,7 @@ func (a *appState) selectPeer(index int) {
 		a.chatHeader.SetText(a.displayNameForPeer(p))
 		a.chatSubHeader.SetText(fmt.Sprintf("%s:%d · %s", p.Addr, p.Port, shortID(p.ID)))
 	})
+	a.clearUnread(key)
 	a.renderHistory(key)
 }
 
@@ -1254,21 +1342,54 @@ func (a *appState) getActivePeer() (string, peer, bool) {
 
 func (a *appState) renderHistory(peerKey string) {
 	history, _ := a.loadHistory(peerKey)
-	var b strings.Builder
+	items := make([]fyne.CanvasObject, 0, len(history))
 	for _, m := range history {
-		name := m.From
-		if m.Direction == "out" {
-			name = "我"
-		}
-		b.WriteString("[")
-		b.WriteString(time.Unix(m.SentAt, 0).Format("15:04:05"))
-		b.WriteString("] ")
-		b.WriteString(name)
-		b.WriteString(": ")
-		b.WriteString(m.Text)
-		b.WriteString("\n")
+		items = append(items, renderBubbleMessage(m))
 	}
-	a.safeUI(func() { a.chatView.SetText(b.String()) })
+	a.safeUI(func() {
+		if a.chatStream == nil {
+			return
+		}
+		a.chatStream.Objects = items
+		a.chatStream.Refresh()
+		if a.chatScroll != nil {
+			a.chatScroll.ScrollToBottom()
+		}
+	})
+}
+
+func renderBubbleMessage(m historyLine) fyne.CanvasObject {
+	outgoing := m.Direction == "out"
+	meta := time.Unix(m.SentAt, 0).Format("15:04")
+	if outgoing {
+		meta = "我  " + meta
+	} else if strings.TrimSpace(m.From) != "" {
+		meta = m.From + "  " + meta
+	}
+
+	metaLabel := widget.NewLabel(meta)
+	bodyLabel := widget.NewLabel(m.Text)
+	bodyLabel.Wrapping = fyne.TextWrapWord
+
+	bgColor := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	if outgoing {
+		bgColor = color.NRGBA{R: 217, G: 235, B: 255, A: 255}
+	}
+	bubble := container.NewMax(
+		canvas.NewRectangle(bgColor),
+		container.NewPadded(bodyLabel),
+	)
+
+	var metaRow *fyne.Container
+	var bodyRow *fyne.Container
+	if outgoing {
+		metaRow = container.NewHBox(layout.NewSpacer(), metaLabel)
+		bodyRow = container.NewHBox(layout.NewSpacer(), container.NewPadded(bubble))
+	} else {
+		metaRow = container.NewHBox(metaLabel, layout.NewSpacer())
+		bodyRow = container.NewHBox(container.NewPadded(bubble), layout.NewSpacer())
+	}
+	return container.NewVBox(metaRow, bodyRow)
 }
 
 func (a *appState) refreshChatIfActive(peerKey string) {
