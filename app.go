@@ -668,7 +668,7 @@ func (a *appState) refreshHeaderByKey(key string) {
 	}
 	a.safeUI(func() {
 		a.chatHeader.SetText(a.displayNameForPeer(p))
-		a.chatSubHeader.SetText(fmt.Sprintf("%s:%d · %s", p.Addr, p.Port, shortID(p.ID)))
+		a.chatSubHeader.SetText(fmt.Sprintf("%s · %s", p.Addr, shortID(p.ID)))
 	})
 }
 
@@ -1287,7 +1287,7 @@ func (a *appState) refreshContacts() {
 	rows := make([]peerRow, 0, len(pairs))
 	for _, p := range pairs {
 		title := a.displayNameForPeer(p)
-		sub := fmt.Sprintf("%s:%d · %s", p.Addr, p.Port, shortID(p.ID))
+		sub := fmt.Sprintf("%s · %s", p.Addr, shortID(p.ID))
 		unreadCount := unread[p.Key]
 		if unreadCount > 0 {
 			title = fmt.Sprintf("%s (%d)", title, unreadCount)
@@ -1321,7 +1321,7 @@ func (a *appState) selectPeer(index int) {
 	}
 	a.safeUI(func() {
 		a.chatHeader.SetText(a.displayNameForPeer(p))
-		a.chatSubHeader.SetText(fmt.Sprintf("%s:%d · %s", p.Addr, p.Port, shortID(p.ID)))
+		a.chatSubHeader.SetText(fmt.Sprintf("%s · %s", p.Addr, shortID(p.ID)))
 	})
 	a.clearUnread(key)
 	a.renderHistory(key)
