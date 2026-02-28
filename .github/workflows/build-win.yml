@@ -1,0 +1,41 @@
+name: build-win-portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Download deps
+        run: go mod download
+
+      - name: Build exe
+        run: go build -trimpath -ldflags "-s -w -H=windowsgui" -o dist/LanTalk/LanTalk.exe .
+
+      - name: Prepare package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/LanTalk/data | Out-Null
+          Copy-Item README.md dist/LanTalk/README.md -Force
+
+      - name: Zip portable
+        shell: pwsh
+        run: Compress-Archive -Path dist/LanTalk/* -DestinationPath dist/LanTalk-win-x64.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanTalk-win-x64
+          path: dist/LanTalk-win-x64.zip
