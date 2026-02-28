@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -34,15 +38,17 @@ import (
 )
 
 const (
-	discoveryPort   = 43999
-	discoveryHost   = "239.255.77.77"
-	defaultChatPort = 44000
-	presenceTTL     = 20 * time.Second
-	announceEvery   = 3 * time.Second
-	autoProbeEvery  = 10 * time.Second
-	scanBatchSize   = 220
-	maxFileBytes    = 8 << 20
-	maxFrameBytes   = 20 << 20
+	discoveryPort          = 43999
+	discoveryHost          = "239.255.77.77"
+	defaultChatPort        = 44000
+	presenceTTL            = 20 * time.Second
+	announceEvery          = 3 * time.Second
+	autoProbeEvery         = 10 * time.Second
+	scanBatchSize          = 220
+	maxEnvelopeBytes       = 1 << 20
+	maxFrameBytes          = 20 << 20
+	fileChunkBytes         = 1 << 20
+	maxFileBytes     int64 = 100 * 1024 * 1024 * 1024
 )
 
 type config struct {
@@ -74,13 +80,15 @@ type discoveryPacket struct {
 }
 
 type plainPayload struct {
-	ID       string `json:"id"`
-	Kind     string `json:"kind"`
-	Text     string `json:"text,omitempty"`
-	FileName string `json:"fileName,omitempty"`
-	FileData string `json:"fileData,omitempty"`
-	FileSize int64  `json:"fileSize,omitempty"`
-	SentAt   int64  `json:"sentAt"`
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`
+	Text       string `json:"text,omitempty"`
+	FileName   string `json:"fileName,omitempty"`
+	FileSize   int64  `json:"fileSize,omitempty"`
+	ChunkSize  int    `json:"chunkSize,omitempty"`
+	TransferID string `json:"transferId,omitempty"`
+	Salt       string `json:"salt,omitempty"`
+	SentAt     int64  `json:"sentAt"`
 }
 
 type encryptedMessage struct {
@@ -96,7 +104,7 @@ type chatEnvelope struct {
 	FromName     string           `json:"fromName"`
 	FromPubKey   string           `json:"fromPubKey"`
 	Port         int              `json:"port,omitempty"`
-	Payload      encryptedMessage `json:"payload"`
+	Payload      encryptedMessage `json:"payload,omitempty"`
 }
 
 type historyLine struct {
@@ -120,7 +128,6 @@ func (oldQQTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) col
 		return theme.DefaultTheme().Color(name, variant)
 	}
 }
-
 func (oldQQTheme) Font(style fyne.TextStyle) fyne.Resource    { return theme.DefaultTheme().Font(style) }
 func (oldQQTheme) Icon(name fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(name) }
 func (oldQQTheme) Size(name fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(name) }
@@ -187,7 +194,6 @@ func (a *appState) run() error {
 	if err := a.buildUI(); err != nil {
 		return err
 	}
-
 	port, err := a.startTCPServer()
 	if err != nil {
 		return err
@@ -197,7 +203,6 @@ func (a *appState) run() error {
 		return err
 	}
 	a.pushStatus(fmt.Sprintf("已启动: TCP %d | 自动发现: 组播 + 广播 + 自动探测", port))
-
 	a.win.ShowAndRun()
 	a.shutdown()
 	return nil
@@ -303,7 +308,7 @@ func (a *appState) buildUI() error {
 
 	a.chatLabel = widget.NewLabel("请选择左侧好友")
 	a.chatLabel.TextStyle = fyne.TextStyle{Bold: true}
-	a.chatSubLabel = widget.NewLabel("提示: 同机双开可互测；跨子网依赖自动探测")
+	a.chatSubLabel = widget.NewLabel("提示: 同机双开可互测；文件传输为分片端到端加密")
 
 	a.chatView = widget.NewMultiLineEntry()
 	a.chatView.Disable()
@@ -382,8 +387,9 @@ func (a *appState) startTCPServer() (int, error) {
 
 func (a *appState) handleTCPConn(conn net.Conn) {
 	defer conn.Close()
-	var env chatEnvelope
-	if err := json.NewDecoder(io.LimitReader(conn, maxFrameBytes)).Decode(&env); err != nil {
+	reader := bufio.NewReader(conn)
+	env, err := readEnvelope(reader)
+	if err != nil {
 		return
 	}
 	host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
@@ -393,6 +399,8 @@ func (a *appState) handleTCPConn(conn net.Conn) {
 		a.handleProbe(conn, host, env)
 	case "chat":
 		a.handleChat(host, env)
+	case "file_stream":
+		a.handleFileStream(reader, host, env)
 	}
 }
 
@@ -417,8 +425,7 @@ func (a *appState) handleProbe(conn net.Conn, host string, env chatEnvelope) {
 		FromPubKey:   a.cfg.PublicKey,
 		Port:         a.listenPort,
 	}
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	_ = json.NewEncoder(conn).Encode(ack)
+	_ = writeEnvelope(conn, ack)
 }
 
 func (a *appState) handleChat(host string, env chatEnvelope) {
@@ -444,26 +451,125 @@ func (a *appState) handleChat(host string, env chatEnvelope) {
 	if payload.SentAt == 0 {
 		payload.SentAt = time.Now().Unix()
 	}
-
-	display := ""
-	switch payload.Kind {
-	case "", "text":
-		display = payload.Text
-	case "file":
-		msg, err := a.saveIncomingFile(payload)
-		if err != nil {
-			display = "[文件接收失败] " + err.Error()
-		} else {
-			display = msg
-		}
-	default:
-		display = "[未知消息类型]"
+	if payload.Kind != "" && payload.Kind != "text" {
+		return
 	}
-	if strings.TrimSpace(display) == "" {
+	if strings.TrimSpace(payload.Text) == "" {
 		return
 	}
 
-	line := historyLine{Direction: "in", From: env.FromName, Text: display, SentAt: payload.SentAt}
+	line := historyLine{Direction: "in", From: env.FromName, Text: payload.Text, SentAt: payload.SentAt}
+	a.appendHistory(peerKey, line)
+	a.refreshChatIfActive(peerKey)
+}
+
+func (a *appState) handleFileStream(reader *bufio.Reader, host string, env chatEnvelope) {
+	if env.FromPubKey == "" || env.FromInstance == a.instanceID {
+		return
+	}
+	peerKey := makePeerKey(env.FromID, env.FromInstance)
+	a.upsertPeer(peer{
+		Key:        peerKey,
+		ID:         env.FromID,
+		InstanceID: env.FromInstance,
+		Name:       env.FromName,
+		Addr:       host,
+		Port:       env.Port,
+		PublicKey:  env.FromPubKey,
+		LastSeen:   time.Now(),
+	})
+
+	meta, err := decrypt(env.FromPubKey, a.cfg.PrivateKey, env.Payload)
+	if err != nil {
+		return
+	}
+	if meta.Kind != "file_meta" || meta.FileName == "" || meta.FileSize < 0 || meta.FileSize > maxFileBytes {
+		return
+	}
+	chunkSize := meta.ChunkSize
+	if chunkSize <= 0 || chunkSize > 4<<20 {
+		chunkSize = fileChunkBytes
+	}
+
+	salt, err := base64.StdEncoding.DecodeString(meta.Salt)
+	if err != nil {
+		return
+	}
+	key, err := deriveKey(a.cfg.PrivateKey, env.FromPubKey, salt)
+	if err != nil {
+		return
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return
+	}
+
+	name := sanitizeFilename(meta.FileName)
+	if name == "" {
+		name = "received.bin"
+	}
+	finalPath := uniqueFilePath(a.downloadsDir, name)
+	partPath := finalPath + ".part"
+	out, err := os.Create(partPath)
+	if err != nil {
+		return
+	}
+	defer out.Close()
+
+	var received int64
+	for idx := uint64(0); ; idx++ {
+		var clen uint32
+		if err := binary.Read(reader, binary.BigEndian, &clen); err != nil {
+			_ = os.Remove(partPath)
+			return
+		}
+		if clen == 0 {
+			break
+		}
+		maxChunkCipher := uint32(chunkSize + gcm.Overhead() + 64)
+		if clen > maxChunkCipher {
+			_ = os.Remove(partPath)
+			return
+		}
+		buf := make([]byte, int(clen))
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			_ = os.Remove(partPath)
+			return
+		}
+		plain, err := gcm.Open(nil, chunkNonce(idx), buf, nil)
+		if err != nil {
+			_ = os.Remove(partPath)
+			return
+		}
+		if received+int64(len(plain)) > meta.FileSize {
+			_ = os.Remove(partPath)
+			return
+		}
+		if _, err := out.Write(plain); err != nil {
+			_ = os.Remove(partPath)
+			return
+		}
+		received += int64(len(plain))
+	}
+	if received != meta.FileSize {
+		_ = os.Remove(partPath)
+		return
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(partPath)
+		return
+	}
+	if err := os.Rename(partPath, finalPath); err != nil {
+		_ = os.Remove(partPath)
+		return
+	}
+	rel, _ := filepath.Rel(a.baseDir, finalPath)
+	msg := fmt.Sprintf("[文件] %s 已接收 (%s) -> %s", name, humanSize(received), rel)
+	line := historyLine{Direction: "in", From: env.FromName, Text: msg, SentAt: meta.SentAt}
 	a.appendHistory(peerKey, line)
 	a.refreshChatIfActive(peerKey)
 }
@@ -500,34 +606,126 @@ func (a *appState) sendCurrentFile() {
 		if rc == nil {
 			return
 		}
-		defer rc.Close()
-
-		name := filepath.Base(rc.URI().Path())
-		if name == "" || name == "." {
-			name = "file.bin"
+		uri := rc.URI()
+		_ = rc.Close()
+		path := uriLocalPath(uri)
+		if path == "" {
+			a.pushStatus("无法解析文件路径")
+			return
 		}
-		data, err := io.ReadAll(io.LimitReader(rc, maxFileBytes+1))
+		info, err := os.Stat(path)
 		if err != nil {
-			a.pushStatus("读取文件失败")
+			a.pushStatus("读取文件属性失败")
 			return
 		}
-		if len(data) > maxFileBytes {
-			a.pushStatus("文件过大，最大 8MB")
+		if info.Size() > maxFileBytes {
+			a.pushStatus("文件过大，单文件最大 100GB")
 			return
 		}
-		payload := plainPayload{
-			ID:       randomID(8),
-			Kind:     "file",
-			FileName: sanitizeFilename(name),
-			FileData: base64.StdEncoding.EncodeToString(data),
-			FileSize: int64(len(data)),
-			SentAt:   time.Now().Unix(),
-		}
-		historyText := fmt.Sprintf("[文件] %s (%s) 已发送", payload.FileName, humanSize(payload.FileSize))
-		if err := a.sendPayload(peerKey, p, payload, historyText); err != nil {
-			a.pushStatus("发送文件失败: " + err.Error())
-		}
+		name := sanitizeFilename(filepath.Base(path))
+		go func() {
+			a.pushStatus(fmt.Sprintf("开始发送文件: %s (%s)", name, humanSize(info.Size())))
+			if err := a.sendFileStream(peerKey, p, path, name, info.Size()); err != nil {
+				fail := fmt.Sprintf("[文件] %s 发送失败: %s", name, err.Error())
+				a.appendHistory(peerKey, historyLine{Direction: "out", From: a.cfg.Name, Text: fail, SentAt: time.Now().Unix()})
+				a.refreshChatIfActive(peerKey)
+				a.pushStatus("发送文件失败: " + err.Error())
+				return
+			}
+			a.pushStatus("文件发送完成")
+		}()
 	}, a.win)
+}
+
+func (a *appState) sendFileStream(peerKey string, p peer, path, name string, size int64) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return err
+	}
+	key, err := deriveKey(a.cfg.PrivateKey, p.PublicKey, salt)
+	if err != nil {
+		return err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+
+	meta := plainPayload{
+		ID:         randomID(8),
+		Kind:       "file_meta",
+		FileName:   name,
+		FileSize:   size,
+		ChunkSize:  fileChunkBytes,
+		TransferID: randomID(8),
+		Salt:       base64.StdEncoding.EncodeToString(salt),
+		SentAt:     time.Now().Unix(),
+	}
+	metaEnc, err := encrypt(p.PublicKey, a.cfg.PrivateKey, meta)
+	if err != nil {
+		return err
+	}
+	env := chatEnvelope{
+		Type:         "file_stream",
+		FromID:       a.cfg.ID,
+		FromInstance: a.instanceID,
+		FromName:     a.cfg.Name,
+		FromPubKey:   a.cfg.PublicKey,
+		Port:         a.listenPort,
+		Payload:      metaEnc,
+	}
+
+	conn, err := net.DialTimeout("tcp4", fmt.Sprintf("%s:%d", p.Addr, p.Port), 4*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Time{})
+	bw := bufio.NewWriterSize(conn, 128*1024)
+	if err := writeEnvelope(bw, env); err != nil {
+		return err
+	}
+
+	buf := make([]byte, fileChunkBytes)
+	for idx := uint64(0); ; idx++ {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			sealed := gcm.Seal(nil, chunkNonce(idx), buf[:n], nil)
+			if err := binary.Write(bw, binary.BigEndian, uint32(len(sealed))); err != nil {
+				return err
+			}
+			if _, err := bw.Write(sealed); err != nil {
+				return err
+			}
+		}
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+	if err := binary.Write(bw, binary.BigEndian, uint32(0)); err != nil {
+		return err
+	}
+	if err := bw.Flush(); err != nil {
+		return err
+	}
+
+	history := fmt.Sprintf("[文件] %s (%s) 已发送", name, humanSize(size))
+	a.appendHistory(peerKey, historyLine{Direction: "out", From: a.cfg.Name, Text: history, SentAt: meta.SentAt})
+	a.refreshChatIfActive(peerKey)
+	return nil
 }
 
 func (a *appState) sendPayload(peerKey string, p peer, payload plainPayload, historyText string) error {
@@ -644,7 +842,7 @@ func (a *appState) startDiscovery(chatPort int) error {
 		ticker := time.NewTicker(autoProbeEvery)
 		defer ticker.Stop()
 		for {
-			a.probeAutoTargets()
+			go a.probeAutoTargets()
 			select {
 			case <-ticker.C:
 			case <-a.stopCh:
@@ -653,22 +851,13 @@ func (a *appState) startDiscovery(chatPort int) error {
 		}
 	}()
 
-	a.probeAutoTargets()
+	go a.probeAutoTargets()
 	return nil
 }
 
 func (a *appState) broadcastHello(chatPort int) {
-	pkt := discoveryPacket{
-		Type:       "hello",
-		ID:         a.cfg.ID,
-		InstanceID: a.instanceID,
-		Name:       a.cfg.Name,
-		PublicKey:  a.cfg.PublicKey,
-		Port:       chatPort,
-		Time:       time.Now().Unix(),
-	}
+	pkt := discoveryPacket{Type: "hello", ID: a.cfg.ID, InstanceID: a.instanceID, Name: a.cfg.Name, PublicKey: a.cfg.PublicKey, Port: chatPort, Time: time.Now().Unix()}
 	b, _ := json.Marshal(pkt)
-
 	targets := []net.IP{net.ParseIP(discoveryHost), net.IPv4bcast}
 	targets = append(targets, localDirectedBroadcasts()...)
 	for _, ip := range targets {
@@ -686,9 +875,18 @@ func (a *appState) broadcastHello(chatPort int) {
 
 func (a *appState) probeAutoTargets() {
 	targets := a.collectAutoProbeTargets()
+	sem := make(chan struct{}, 24)
+	var wg sync.WaitGroup
 	for _, t := range targets {
-		_ = a.probeTarget(t)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(target string) {
+			defer wg.Done()
+			_ = a.probeTarget(target)
+			<-sem
+		}(t)
 	}
+	wg.Wait()
 }
 
 func (a *appState) collectAutoProbeTargets() []string {
@@ -721,8 +919,7 @@ func (a *appState) collectAutoProbeTargets() []string {
 				if delta == 0 && host == int(ip[3]) {
 					continue
 				}
-				target := fmt.Sprintf("%d.%d.%d.%d:%d", ip[0], ip[1], third, host, defaultChatPort)
-				set[target] = struct{}{}
+				set[fmt.Sprintf("%d.%d.%d.%d:%d", ip[0], ip[1], third, host, defaultChatPort)] = struct{}{}
 			}
 		}
 	}
@@ -756,20 +953,13 @@ func (a *appState) probeTarget(target string) error {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(900 * time.Millisecond))
 
-	probe := chatEnvelope{
-		Type:         "probe",
-		FromID:       a.cfg.ID,
-		FromInstance: a.instanceID,
-		FromName:     a.cfg.Name,
-		FromPubKey:   a.cfg.PublicKey,
-		Port:         a.listenPort,
-	}
-	if err := json.NewEncoder(conn).Encode(probe); err != nil {
+	probe := chatEnvelope{Type: "probe", FromID: a.cfg.ID, FromInstance: a.instanceID, FromName: a.cfg.Name, FromPubKey: a.cfg.PublicKey, Port: a.listenPort}
+	if err := writeEnvelope(conn, probe); err != nil {
 		return err
 	}
-
-	var ack chatEnvelope
-	if err := json.NewDecoder(io.LimitReader(conn, 1<<20)).Decode(&ack); err != nil {
+	reader := bufio.NewReader(conn)
+	ack, err := readEnvelope(reader)
+	if err != nil {
 		return err
 	}
 	if ack.Type != "probe_ack" || ack.FromID == "" || ack.FromPubKey == "" || ack.FromInstance == a.instanceID {
@@ -777,16 +967,7 @@ func (a *appState) probeTarget(target string) error {
 	}
 
 	host, _, _ := net.SplitHostPort(target)
-	a.upsertPeer(peer{
-		Key:        makePeerKey(ack.FromID, ack.FromInstance),
-		ID:         ack.FromID,
-		InstanceID: ack.FromInstance,
-		Name:       ack.FromName,
-		Addr:       host,
-		Port:       ack.Port,
-		PublicKey:  ack.FromPubKey,
-		LastSeen:   time.Now(),
-	})
+	a.upsertPeer(peer{Key: makePeerKey(ack.FromID, ack.FromInstance), ID: ack.FromID, InstanceID: ack.FromInstance, Name: ack.FromName, Addr: host, Port: ack.Port, PublicKey: ack.FromPubKey, LastSeen: time.Now()})
 	return nil
 }
 
@@ -846,13 +1027,12 @@ func (a *appState) refreshContacts() {
 		if filter != "" && !strings.Contains(show, filter) {
 			continue
 		}
-		displayName := p.Name
+		display := p.Name
 		if p.ID == a.cfg.ID {
-			displayName += " [本机实例]"
+			display += " [本机实例]"
 		}
-		title := fmt.Sprintf("%s\n%s:%d  #%s", displayName, p.Addr, p.Port, shortID(p.InstanceID))
+		titles = append(titles, fmt.Sprintf("%s\n%s:%d  #%s", display, p.Addr, p.Port, shortID(p.InstanceID)))
 		keys = append(keys, p.Key)
-		titles = append(titles, title)
 	}
 
 	a.mu.Lock()
@@ -957,32 +1137,7 @@ func (a *appState) historyPath(peerKey string) string {
 	return filepath.Join(a.chatsDir, sanitizeFilename(peerKey)+".json")
 }
 
-func (a *appState) saveIncomingFile(payload plainPayload) (string, error) {
-	if payload.FileName == "" || payload.FileData == "" {
-		return "", errors.New("文件数据不完整")
-	}
-	raw, err := base64.StdEncoding.DecodeString(payload.FileData)
-	if err != nil {
-		return "", err
-	}
-	if len(raw) > maxFileBytes {
-		return "", errors.New("文件超过 8MB 限制")
-	}
-	name := sanitizeFilename(payload.FileName)
-	if name == "" {
-		name = "received.bin"
-	}
-	target := uniqueFilePath(a.downloadsDir, name)
-	if err := os.WriteFile(target, raw, 0o644); err != nil {
-		return "", err
-	}
-	rel, _ := filepath.Rel(a.baseDir, target)
-	return fmt.Sprintf("[文件] %s 已接收 (%s) -> %s", name, humanSize(int64(len(raw))), rel), nil
-}
-
-func (a *appState) pushStatus(text string) {
-	a.safeUI(func() { a.statusBar.SetText(text) })
-}
+func (a *appState) pushStatus(text string) { a.safeUI(func() { a.statusBar.SetText(text) }) }
 
 func (a *appState) safeUI(fn func()) {
 	if a.uiApp == nil {
@@ -1013,7 +1168,39 @@ func sendEnvelope(p peer, env chatEnvelope) error {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
-	return json.NewEncoder(conn).Encode(env)
+	return writeEnvelope(conn, env)
+}
+
+func writeEnvelope(w io.Writer, env chatEnvelope) error {
+	b, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	if len(b) > maxEnvelopeBytes {
+		return errors.New("envelope too large")
+	}
+	b = append(b, '\n')
+	_, err = w.Write(b)
+	return err
+}
+
+func readEnvelope(r *bufio.Reader) (chatEnvelope, error) {
+	line, err := r.ReadBytes('\n')
+	if err != nil {
+		return chatEnvelope{}, err
+	}
+	if len(line) > maxEnvelopeBytes {
+		return chatEnvelope{}, errors.New("envelope too large")
+	}
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return chatEnvelope{}, errors.New("empty envelope")
+	}
+	var env chatEnvelope
+	if err := json.Unmarshal(line, &env); err != nil {
+		return chatEnvelope{}, err
+	}
+	return env, nil
 }
 
 func generateKeyPair() (pubB64, privB64 string, err error) {
@@ -1054,11 +1241,7 @@ func encrypt(peerPubB64, selfPrivB64 string, payload plainPayload) (encryptedMes
 		return encryptedMessage{}, err
 	}
 	cipherText := gcm.Seal(nil, nonce, plainBytes, nil)
-	return encryptedMessage{
-		Salt:  base64.StdEncoding.EncodeToString(salt),
-		Nonce: base64.StdEncoding.EncodeToString(nonce),
-		Data:  base64.StdEncoding.EncodeToString(cipherText),
-	}, nil
+	return encryptedMessage{Salt: base64.StdEncoding.EncodeToString(salt), Nonce: base64.StdEncoding.EncodeToString(nonce), Data: base64.StdEncoding.EncodeToString(cipherText)}, nil
 }
 
 func decrypt(senderPubB64, selfPrivB64 string, c encryptedMessage) (plainPayload, error) {
@@ -1133,6 +1316,23 @@ func makePeerKey(id, instance string) string {
 	return id + "@" + instance
 }
 
+func chunkNonce(idx uint64) []byte {
+	nonce := make([]byte, 12)
+	binary.BigEndian.PutUint64(nonce[4:], idx)
+	return nonce
+}
+
+func uriLocalPath(u fyne.URI) string {
+	if u == nil {
+		return ""
+	}
+	p := u.Path()
+	if runtime.GOOS == "windows" && strings.HasPrefix(p, "/") && len(p) > 2 && p[2] == ':' {
+		p = p[1:]
+	}
+	return filepath.FromSlash(p)
+}
+
 func sanitizeFilename(s string) string {
 	if s == "" {
 		return ""
@@ -1180,7 +1380,7 @@ func humanSize(n int64) string {
 	if n < 1024 {
 		return fmt.Sprintf("%d B", n)
 	}
-	units := []string{"KB", "MB", "GB"}
+	units := []string{"KB", "MB", "GB", "TB"}
 	f := float64(n)
 	idx := -1
 	for f >= 1024 && idx < len(units)-1 {
