@@ -164,6 +164,68 @@ func (e *chatInput) TypedKey(key *fyne.KeyEvent) {
 	e.Entry.TypedKey(key)
 }
 
+type emojiTile struct {
+	widget.BaseWidget
+	emoji string
+	onTap func(string)
+}
+
+func newEmojiTile(emoji string, onTap func(string)) *emojiTile {
+	tile := &emojiTile{emoji: emoji, onTap: onTap}
+	tile.ExtendBaseWidget(tile)
+	return tile
+}
+
+func (t *emojiTile) Tapped(*fyne.PointEvent) {
+	if t.onTap != nil {
+		t.onTap(t.emoji)
+	}
+}
+
+func (t *emojiTile) TappedSecondary(*fyne.PointEvent) {}
+
+func (t *emojiTile) CreateRenderer() fyne.WidgetRenderer {
+	bg := canvas.NewRectangle(color.Transparent)
+	bg.CornerRadius = 6
+	txt := canvas.NewText(t.emoji, color.NRGBA{R: 40, G: 45, B: 55, A: 255})
+	txt.Alignment = fyne.TextAlignCenter
+	txt.TextSize = 24
+	content := container.NewMax(bg, container.NewCenter(txt))
+	return &emojiTileRenderer{tile: t, bg: bg, txt: txt, content: content}
+}
+
+type emojiTileRenderer struct {
+	tile    *emojiTile
+	bg      *canvas.Rectangle
+	txt     *canvas.Text
+	content *fyne.Container
+}
+
+func (r *emojiTileRenderer) Layout(size fyne.Size) {
+	r.content.Resize(size)
+}
+
+func (r *emojiTileRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(42, 42)
+}
+
+func (r *emojiTileRenderer) Refresh() {
+	r.bg.FillColor = color.Transparent
+	r.txt.Text = r.tile.emoji
+	r.bg.Refresh()
+	r.txt.Refresh()
+}
+
+func (r *emojiTileRenderer) BackgroundColor() color.Color {
+	return color.Transparent
+}
+
+func (r *emojiTileRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.content}
+}
+
+func (r *emojiTileRenderer) Destroy() {}
+
 func (oldQQTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNamePrimary:
@@ -202,7 +264,6 @@ type appState struct {
 	stopCh         chan struct{}
 	uiApp          fyne.App
 	win            fyne.Window
-	settingsWin    fyne.Window
 	contactBox     *widget.List
 	searchInput    *widget.Entry
 	topInfo        *widget.Label
@@ -376,7 +437,7 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	a.chatHeader = widget.NewLabel("请选择联系人")
 	a.chatHeader.TextStyle = fyne.TextStyle{Bold: true}
 	a.chatSubHeader = widget.NewLabel("")
-	remarkBtn := widget.NewButtonWithIcon("备注", theme.DocumentCreateIcon(), func() { a.openRemarkDialog() })
+	profileBtn := widget.NewButtonWithIcon("资料", theme.InfoIcon(), func() { a.openPeerProfileDialog() })
 
 	a.chatStream = container.NewVBox()
 	a.chatScroll = container.NewVScroll(a.chatStream)
@@ -402,7 +463,7 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 		a.headerAvatar,
 		container.NewVBox(a.chatHeader, a.chatSubHeader),
 		layout.NewSpacer(),
-		remarkBtn,
+		profileBtn,
 	)
 	chatSplit := container.NewVSplit(a.chatScroll, a.inputBox)
 	chatSplit.Offset = 0.78
@@ -428,16 +489,6 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 }
 
 func (a *appState) openSettingsWindow() {
-	if a.settingsWin != nil {
-		a.settingsWin.Show()
-		a.settingsWin.RequestFocus()
-		return
-	}
-
-	w := a.uiApp.NewWindow("个人设置")
-	w.SetIcon(resourceAppIcon)
-	w.Resize(fyne.NewSize(520, 420))
-
 	avatarPreview := avatarImage(a.avatarAbsPath(), 132)
 	a.settingsAvatar = avatarPreview
 
@@ -457,8 +508,8 @@ func (a *appState) openSettingsWindow() {
 			if path == "" {
 				return
 			}
-			a.applyAvatar(path, w)
-		}, w)
+			a.applyAvatar(path, a.win)
+		}, a.win)
 	})
 	clearAvatarBtn := widget.NewButton("移除头像", func() {
 		a.cfg.Avatar = ""
@@ -467,28 +518,8 @@ func (a *appState) openSettingsWindow() {
 	})
 
 	copyIDBtn := widget.NewButton("复制识别码", func() {
-		w.Clipboard().SetContent(strings.TrimSpace(a.cfg.ID))
+		a.win.Clipboard().SetContent(strings.TrimSpace(a.cfg.ID))
 		a.pushStatus("已复制")
-	})
-	saveBtn := widget.NewButton("保存设置", func() {
-		name := strings.TrimSpace(nameInput.Text)
-		if name == "" {
-			name = "LanUser"
-		}
-		a.cfg.Name = name
-		if err := a.saveConfig(); err != nil {
-			dialog.ShowError(err, w)
-			return
-		}
-		if a.listenPort > 0 {
-			a.broadcastHello(a.listenPort)
-		}
-		a.refreshContacts()
-		a.refreshAvatarViews()
-		if a.topInfo != nil {
-			a.topInfo.SetText(fmt.Sprintf("%s  ·  %s", a.cfg.Name, shortID(a.cfg.ID)))
-		}
-		a.pushStatus("已保存")
 	})
 
 	avatarRow := container.NewHBox(
@@ -499,13 +530,34 @@ func (a *appState) openSettingsWindow() {
 		widget.NewFormItem("昵称", nameInput),
 		widget.NewFormItem("识别码", idInput),
 	)
-	w.SetContent(container.NewPadded(widget.NewCard("", "", container.NewVBox(avatarRow, infoForm, container.NewHBox(copyIDBtn, layout.NewSpacer(), saveBtn)))))
-	w.SetOnClosed(func() {
+	content := container.NewPadded(widget.NewCard("", "", container.NewVBox(avatarRow, infoForm, copyIDBtn)))
+	dlg := dialog.NewCustomConfirm("个人设置", "保存", "关闭", content, func(save bool) {
+		if save {
+			name := strings.TrimSpace(nameInput.Text)
+			if name == "" {
+				name = "LanUser"
+			}
+			a.cfg.Name = name
+			if err := a.saveConfig(); err != nil {
+				dialog.ShowError(err, a.win)
+				return
+			}
+			if a.listenPort > 0 {
+				a.broadcastHello(a.listenPort)
+			}
+			a.refreshContacts()
+			a.refreshAvatarViews()
+			if a.topInfo != nil {
+				a.topInfo.SetText(fmt.Sprintf("%s  ·  %s", a.cfg.Name, shortID(a.cfg.ID)))
+			}
+			a.pushStatus("已保存")
+		}
+	}, a.win)
+	dlg.SetOnClosed(func() {
 		a.settingsAvatar = nil
-		a.settingsWin = nil
 	})
-	a.settingsWin = w
-	w.Show()
+	dlg.Resize(fyne.NewSize(520, 420))
+	dlg.Show()
 }
 
 func (a *appState) applyAvatar(srcPath string, owner fyne.Window) {
@@ -552,23 +604,53 @@ func (a *appState) refreshAvatarViews() {
 	})
 }
 
-func (a *appState) openRemarkDialog() {
+func (a *appState) openPeerProfileDialog() {
 	key, p, ok := a.getActivePeer()
 	if !ok {
 		return
 	}
-	entry := widget.NewEntry()
-	entry.SetText(a.getRemark(p.ID))
-	content := container.NewVBox(widget.NewLabel("好友备注"), entry)
-	dlg := dialog.NewCustomConfirm("设置备注", "保存", "取消", content, func(confirm bool) {
-		if !confirm {
-			return
+
+	nameText := widget.NewEntry()
+	nameText.SetText(strings.TrimSpace(p.Name))
+	nameText.Disable()
+
+	ipText := widget.NewEntry()
+	ipText.SetText(strings.TrimSpace(p.Addr))
+	ipText.Disable()
+
+	idText := widget.NewEntry()
+	idText.SetText(strings.TrimSpace(p.ID))
+	idText.Disable()
+
+	remarkInput := widget.NewEntry()
+	remarkInput.SetText(a.getRemark(p.ID))
+
+	copyIPBtn := widget.NewButton("复制IP", func() {
+		a.win.Clipboard().SetContent(strings.TrimSpace(p.Addr))
+		a.pushStatus("已复制")
+	})
+	copyIDBtn := widget.NewButton("复制识别码", func() {
+		a.win.Clipboard().SetContent(strings.TrimSpace(p.ID))
+		a.pushStatus("已复制")
+	})
+
+	content := container.NewPadded(container.NewVBox(
+		widget.NewForm(
+			widget.NewFormItem("昵称", nameText),
+			widget.NewFormItem("IP", ipText),
+			widget.NewFormItem("识别码", idText),
+			widget.NewFormItem("好友备注", remarkInput),
+		),
+		container.NewHBox(copyIPBtn, copyIDBtn),
+	))
+	dlg := dialog.NewCustomConfirm("好友资料", "保存", "关闭", content, func(confirm bool) {
+		if confirm {
+			a.setRemark(p.ID, remarkInput.Text)
+			a.refreshContacts()
+			a.refreshHeaderByKey(key)
 		}
-		a.setRemark(p.ID, entry.Text)
-		a.refreshContacts()
-		a.refreshHeaderByKey(key)
 	}, a.win)
-	dlg.Resize(fyne.NewSize(360, 160))
+	dlg.Resize(fyne.NewSize(520, 320))
 	dlg.Show()
 }
 
@@ -578,16 +660,19 @@ func (a *appState) openEmojiPicker() {
 		"🤔", "😴", "😭", "😡", "😱", "🥳", "🤝", "👍",
 		"👏", "🙏", "💯", "🔥", "❤️", "💙", "🎉", "🌟",
 	}
-	grid := container.NewGridWithColumns(6)
+	var dlg *dialog.CustomDialog
+	grid := container.NewGridWithColumns(8)
 	for _, e := range emojis {
 		emoji := e
-		btn := widget.NewButton(emoji, func() {
+		grid.Add(newEmojiTile(emoji, func(string) {
 			a.insertToInput(emoji)
-		})
-		grid.Add(btn)
+			if dlg != nil {
+				dlg.Hide()
+			}
+		}))
 	}
-	dlg := dialog.NewCustom("选择表情", "关闭", container.NewPadded(grid), a.win)
-	dlg.Resize(fyne.NewSize(420, 260))
+	dlg = dialog.NewCustom("选择表情", "关闭", container.NewPadded(grid), a.win)
+	dlg.Resize(fyne.NewSize(520, 260))
 	dlg.Show()
 }
 
@@ -668,7 +753,7 @@ func (a *appState) refreshHeaderByKey(key string) {
 	}
 	a.safeUI(func() {
 		a.chatHeader.SetText(a.displayNameForPeer(p))
-		a.chatSubHeader.SetText(fmt.Sprintf("%s · %s", p.Addr, shortID(p.ID)))
+		a.chatSubHeader.SetText("局域网在线")
 	})
 }
 
@@ -1287,7 +1372,7 @@ func (a *appState) refreshContacts() {
 	rows := make([]peerRow, 0, len(pairs))
 	for _, p := range pairs {
 		title := a.displayNameForPeer(p)
-		sub := fmt.Sprintf("%s · %s", p.Addr, shortID(p.ID))
+		sub := "局域网在线"
 		unreadCount := unread[p.Key]
 		if unreadCount > 0 {
 			title = fmt.Sprintf("%s (%d)", title, unreadCount)
@@ -1321,7 +1406,7 @@ func (a *appState) selectPeer(index int) {
 	}
 	a.safeUI(func() {
 		a.chatHeader.SetText(a.displayNameForPeer(p))
-		a.chatSubHeader.SetText(fmt.Sprintf("%s · %s", p.Addr, shortID(p.ID)))
+		a.chatSubHeader.SetText("局域网在线")
 	})
 	a.clearUnread(key)
 	a.renderHistory(key)
@@ -1375,8 +1460,13 @@ func renderBubbleMessage(m historyLine) fyne.CanvasObject {
 	if outgoing {
 		bgColor = color.NRGBA{R: 217, G: 235, B: 255, A: 255}
 	}
+	bg := canvas.NewRectangle(bgColor)
+	bg.CornerRadius = 10
+	widthHolder := canvas.NewRectangle(color.Transparent)
+	widthHolder.SetMinSize(fyne.NewSize(300, 1))
 	bubble := container.NewMax(
-		canvas.NewRectangle(bgColor),
+		widthHolder,
+		bg,
 		container.NewPadded(bodyLabel),
 	)
 
@@ -1384,12 +1474,18 @@ func renderBubbleMessage(m historyLine) fyne.CanvasObject {
 	var bodyRow *fyne.Container
 	if outgoing {
 		metaRow = container.NewHBox(layout.NewSpacer(), metaLabel)
-		bodyRow = container.NewHBox(layout.NewSpacer(), container.NewPadded(bubble))
+		bodyRow = container.NewHBox(layout.NewSpacer(), container.NewPadded(bubble), spacerBox(24))
 	} else {
-		metaRow = container.NewHBox(metaLabel, layout.NewSpacer())
-		bodyRow = container.NewHBox(container.NewPadded(bubble), layout.NewSpacer())
+		metaRow = container.NewHBox(spacerBox(24), metaLabel, layout.NewSpacer())
+		bodyRow = container.NewHBox(spacerBox(24), container.NewPadded(bubble), layout.NewSpacer())
 	}
 	return container.NewVBox(metaRow, bodyRow)
+}
+
+func spacerBox(w float32) *canvas.Rectangle {
+	box := canvas.NewRectangle(color.Transparent)
+	box.SetMinSize(fyne.NewSize(w, 1))
+	return box
 }
 
 func (a *appState) refreshChatIfActive(peerKey string) {
