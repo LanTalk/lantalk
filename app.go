@@ -1,5 +1,3 @@
-//go:build windows
-
 package main
 
 import (
@@ -12,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/color"
 	"io"
 	"net"
 	"os"
@@ -21,8 +20,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lxn/walk"
-	. "github.com/lxn/walk/declarative"
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
 )
@@ -86,28 +91,59 @@ type historyLine struct {
 	SentAt    int64  `json:"sentAt"`
 }
 
+type oldQQTheme struct{}
+
+func (oldQQTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	switch name {
+	case theme.ColorNamePrimary:
+		return color.NRGBA{R: 56, G: 142, B: 255, A: 255}
+	case theme.ColorNameBackground:
+		return color.NRGBA{R: 245, G: 250, B: 255, A: 255}
+	case theme.ColorNameInputBackground:
+		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	default:
+		return theme.DefaultTheme().Color(name, variant)
+	}
+}
+
+func (oldQQTheme) Font(style fyne.TextStyle) fyne.Resource {
+	return theme.DefaultTheme().Font(style)
+}
+
+func (oldQQTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
+	return theme.DefaultTheme().Icon(name)
+}
+
+func (oldQQTheme) Size(name fyne.ThemeSizeName) float32 {
+	return theme.DefaultTheme().Size(name)
+}
+
 type appState struct {
 	baseDir  string
 	dataDir  string
 	chatsDir string
 	cfg      config
 
-	mu      sync.Mutex
-	peers   map[string]*peer
-	peerIDs []string
-	active  string
+	mu         sync.Mutex
+	peers      map[string]*peer
+	peerIDs    []string
+	peerTitles []string
+	active     string
 
 	tcpListener net.Listener
 	udpConn     *net.UDPConn
+	stopOnce    sync.Once
+	stopCh      chan struct{}
 
-	mw         *walk.MainWindow
-	contactBox *walk.ListBox
-	nameInput  *walk.LineEdit
-	selfLabel  *walk.Label
-	chatLabel  *walk.Label
-	chatView   *walk.TextEdit
-	inputBox   *walk.TextEdit
-	statusBar  *walk.Label
+	uiApp      fyne.App
+	win        fyne.Window
+	contactBox *widget.List
+	nameInput  *widget.Entry
+	selfLabel  *widget.Label
+	chatLabel  *widget.Label
+	chatView   *widget.Entry
+	inputBox   *widget.Entry
+	statusBar  *widget.Label
 }
 
 func newApp(baseDir string) *appState {
@@ -116,7 +152,16 @@ func newApp(baseDir string) *appState {
 		dataDir:  filepath.Join(baseDir, "data"),
 		chatsDir: filepath.Join(baseDir, "data", "chats"),
 		peers:    map[string]*peer{},
+		stopCh:   make(chan struct{}),
 	}
+}
+
+func runApp() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return newApp(filepath.Dir(exe)).run()
 }
 
 func (a *appState) run() error {
@@ -136,11 +181,8 @@ func (a *appState) run() error {
 	}
 	a.pushStatus("已启动，正在发现局域网好友")
 
-	exit := a.mw.Run()
+	a.win.ShowAndRun()
 	a.shutdown()
-	if exit != 0 {
-		return fmt.Errorf("程序退出码: %d", exit)
-	}
 	return nil
 }
 
@@ -154,7 +196,7 @@ func (a *appState) initStorage() error {
 			return err
 		}
 		if a.cfg.ID != "" && a.cfg.PrivateKey != "" && a.cfg.PublicKey != "" {
-			if a.cfg.Name == "" {
+			if strings.TrimSpace(a.cfg.Name) == "" {
 				a.cfg.Name = "LanUser"
 			}
 			return nil
@@ -162,7 +204,7 @@ func (a *appState) initStorage() error {
 	}
 
 	host, _ := os.Hostname()
-	if host == "" {
+	if strings.TrimSpace(host) == "" {
 		host = "LanUser"
 	}
 	pub, priv, err := generateKeyPair()
@@ -187,77 +229,105 @@ func (a *appState) saveConfig() error {
 }
 
 func (a *appState) buildUI() error {
-	if err := (MainWindow{
-		AssignTo: &a.mw,
-		Title:    "LanTalk - 经典局域网聊天",
-		Size:     Size{Width: 980, Height: 680},
-		MinSize:  Size{Width: 860, Height: 560},
-		Layout:   HBox{MarginsZero: true, Spacing: 0},
-		Children: []Widget{
-			Composite{
-				MinSize:    Size{Width: 260},
-				Background: SolidColorBrush{Color: walk.RGB(232, 243, 255)},
-				Layout:     VBox{Margins: Margins{Left: 14, Top: 14, Right: 14, Bottom: 14}, Spacing: 8},
-				Children: []Widget{
-					Composite{
-						Background: SolidColorBrush{Color: walk.RGB(56, 142, 255)},
-						Layout:     VBox{Margins: Margins{Left: 10, Top: 8, Right: 10, Bottom: 8}},
-						Children: []Widget{
-							Label{Text: "LanTalk", Font: Font{PointSize: 13, Family: "Microsoft YaHei UI", Bold: true}, TextColor: walk.RGB(255, 255, 255)},
-							Label{AssignTo: &a.selfLabel, Text: "昵称: -", TextColor: walk.RGB(236, 244, 255)},
-						},
-					},
-					LineEdit{AssignTo: &a.nameInput, Text: a.cfg.Name},
-					PushButton{
-						Text: "保存昵称",
-						OnClicked: func() {
-							name := strings.TrimSpace(a.nameInput.Text())
-							if name == "" {
-								return
-							}
-							a.cfg.Name = name
-							_ = a.saveConfig()
-							a.selfLabel.SetText("昵称: " + a.cfg.Name)
-							a.pushStatus("昵称已更新")
-						},
-					},
-					Label{Text: "在线好友", Font: Font{PointSize: 10, Bold: true}},
-					ListBox{
-						AssignTo: &a.contactBox,
-						Model:    []string{},
-						OnCurrentIndexChanged: func() {
-							a.selectPeer(a.contactBox.CurrentIndex())
-						},
-					},
-				},
-			},
-			Composite{
-				Layout: VBox{Margins: Margins{Left: 16, Top: 12, Right: 16, Bottom: 12}, Spacing: 8},
-				Children: []Widget{
-					Label{AssignTo: &a.chatLabel, Text: "请选择左侧好友开始聊天", Font: Font{PointSize: 11, Bold: true}},
-					TextEdit{AssignTo: &a.chatView, ReadOnly: true, VScroll: true},
-					TextEdit{AssignTo: &a.inputBox, VScroll: true},
-					Composite{
-						Layout: HBox{MarginsZero: true},
-						Children: []Widget{
-							HSpacer{},
-							PushButton{
-								Text: "发送",
-								OnClicked: func() {
-									a.sendCurrentText()
-								},
-							},
-						},
-					},
-					Label{AssignTo: &a.statusBar, Text: "准备就绪", TextColor: walk.RGB(90, 104, 120)},
-				},
-			},
+	a.uiApp = app.NewWithID("lantalk")
+	a.uiApp.Settings().SetTheme(oldQQTheme{})
+	a.win = a.uiApp.NewWindow("LanTalk - 经典局域网聊天")
+	a.win.Resize(fyne.NewSize(980, 680))
+
+	a.selfLabel = widget.NewLabel("昵称: " + a.cfg.Name)
+	a.selfLabel.TextStyle = fyne.TextStyle{Bold: true}
+
+	a.nameInput = widget.NewEntry()
+	a.nameInput.SetText(a.cfg.Name)
+	saveNameBtn := widget.NewButton("保存昵称", func() {
+		name := strings.TrimSpace(a.nameInput.Text)
+		if name == "" {
+			return
+		}
+		a.cfg.Name = name
+		if err := a.saveConfig(); err != nil {
+			dialog.ShowError(err, a.win)
+			return
+		}
+		a.selfLabel.SetText("昵称: " + a.cfg.Name)
+		a.pushStatus("昵称已更新")
+	})
+
+	a.contactBox = widget.NewList(
+		func() int {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return len(a.peerIDs)
 		},
-	}).Create(); err != nil {
-		return err
+		func() fyne.CanvasObject {
+			lbl := widget.NewLabel("")
+			lbl.Wrapping = fyne.TextWrapWord
+			return lbl
+		},
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			a.mu.Lock()
+			text := ""
+			if id >= 0 && id < len(a.peerTitles) {
+				text = a.peerTitles[id]
+			}
+			a.mu.Unlock()
+			obj.(*widget.Label).SetText(text)
+		},
+	)
+	a.contactBox.OnSelected = func(id widget.ListItemID) {
+		a.selectPeer(int(id))
 	}
 
-	a.selfLabel.SetText("昵称: " + a.cfg.Name)
+	a.chatLabel = widget.NewLabel("请选择左侧好友开始聊天")
+	a.chatLabel.TextStyle = fyne.TextStyle{Bold: true}
+
+	a.chatView = widget.NewMultiLineEntry()
+	a.chatView.Disable()
+	a.chatView.Wrapping = fyne.TextWrapWord
+	a.chatView.SetMinRowsVisible(18)
+
+	a.inputBox = widget.NewMultiLineEntry()
+	a.inputBox.Wrapping = fyne.TextWrapWord
+	a.inputBox.SetMinRowsVisible(5)
+
+	sendBtn := widget.NewButton("发送", func() {
+		a.sendCurrentText()
+	})
+
+	a.statusBar = widget.NewLabel("准备就绪")
+
+	headerBg := canvas.NewRectangle(color.NRGBA{R: 56, G: 142, B: 255, A: 255})
+	headerTitle := widget.NewLabel("LanTalk")
+	headerTitle.TextStyle = fyne.TextStyle{Bold: true}
+	headerTitle.Importance = widget.HighImportance
+	header := container.NewMax(
+		headerBg,
+		container.NewPadded(container.NewVBox(headerTitle, a.selfLabel)),
+	)
+
+	leftTop := container.NewVBox(
+		header,
+		a.nameInput,
+		saveNameBtn,
+		widget.NewSeparator(),
+		widget.NewLabel("在线好友"),
+	)
+	leftPane := container.NewBorder(leftTop, nil, nil, nil, a.contactBox)
+	leftBg := canvas.NewRectangle(color.NRGBA{R: 232, G: 243, B: 255, A: 255})
+	left := container.NewMax(leftBg, container.NewPadded(leftPane))
+
+	chatSplit := container.NewVSplit(a.chatView, a.inputBox)
+	chatSplit.Offset = 0.78
+	rightBottom := container.NewVBox(
+		container.NewHBox(layout.NewSpacer(), sendBtn),
+		a.statusBar,
+	)
+	right := container.NewBorder(a.chatLabel, rightBottom, nil, nil, chatSplit)
+	right = container.NewPadded(right)
+
+	hSplit := container.NewHSplit(left, right)
+	hSplit.Offset = 0.28
+	a.win.SetContent(hSplit)
 	return nil
 }
 
@@ -309,7 +379,7 @@ func (a *appState) handleTCPConn(conn net.Conn) {
 }
 
 func (a *appState) sendCurrentText() {
-	text := strings.TrimSpace(a.inputBox.Text())
+	text := strings.TrimSpace(a.inputBox.Text)
 	if text == "" {
 		return
 	}
@@ -385,29 +455,38 @@ func (a *appState) startDiscovery(chatPort int) error {
 		defer ticker.Stop()
 		for {
 			a.broadcastHello(chatPort)
-			<-ticker.C
+			select {
+			case <-ticker.C:
+			case <-a.stopCh:
+				return
+			}
 		}
 	}()
 
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			changed := false
-			now := time.Now()
-			a.mu.Lock()
-			for id, p := range a.peers {
-				if now.Sub(p.LastSeen) > presenceTTL {
-					delete(a.peers, id)
-					changed = true
-					if a.active == id {
-						a.active = ""
+		for {
+			select {
+			case <-ticker.C:
+				changed := false
+				now := time.Now()
+				a.mu.Lock()
+				for id, p := range a.peers {
+					if now.Sub(p.LastSeen) > presenceTTL {
+						delete(a.peers, id)
+						changed = true
+						if a.active == id {
+							a.active = ""
+						}
 					}
 				}
-			}
-			a.mu.Unlock()
-			if changed {
-				a.refreshContacts()
+				a.mu.Unlock()
+				if changed {
+					a.refreshContacts()
+				}
+			case <-a.stopCh:
+				return
 			}
 		}
 	}()
@@ -444,13 +523,17 @@ func (a *appState) upsertPeer(in peer) {
 		return
 	}
 	copyPeer := in
-	if copyPeer.Name == "" {
+	if strings.TrimSpace(copyPeer.Name) == "" {
 		copyPeer.Name = in.ID
 	}
 	if exist != nil {
 		exist.Name = copyPeer.Name
-		exist.Addr = copyPeer.Addr
-		exist.Port = copyPeer.Port
+		if copyPeer.Addr != "" {
+			exist.Addr = copyPeer.Addr
+		}
+		if copyPeer.Port != 0 {
+			exist.Port = copyPeer.Port
+		}
 		exist.LastSeen = copyPeer.LastSeen
 	} else {
 		a.peers[in.ID] = &copyPeer
@@ -470,32 +553,40 @@ func (a *appState) refreshContacts() {
 	sort.Slice(pairs, func(i, j int) bool {
 		return strings.ToLower(pairs[i].Name) < strings.ToLower(pairs[j].Name)
 	})
-	items := make([]string, 0, len(pairs))
+
 	ids := make([]string, 0, len(pairs))
+	titles := make([]string, 0, len(pairs))
 	for _, p := range pairs {
-		items = append(items, fmt.Sprintf("%s  (%s)", p.Name, p.Addr))
 		ids = append(ids, p.ID)
+		titles = append(titles, fmt.Sprintf("%s  (%s)", p.Name, p.Addr))
 	}
 
+	a.mu.Lock()
+	a.peerIDs = ids
+	a.peerTitles = titles
+	a.mu.Unlock()
+
 	a.safeUI(func() {
-		a.peerIDs = ids
-		a.contactBox.SetModel(items)
+		a.contactBox.Refresh()
 	})
 }
 
 func (a *appState) selectPeer(index int) {
+	a.mu.Lock()
 	if index < 0 || index >= len(a.peerIDs) {
+		a.mu.Unlock()
 		return
 	}
 	peerID := a.peerIDs[index]
-	a.mu.Lock()
 	p := a.peers[peerID]
 	a.active = peerID
 	a.mu.Unlock()
 	if p == nil {
 		return
 	}
-	a.chatLabel.SetText("正在与 " + p.Name + " 对话")
+	a.safeUI(func() {
+		a.chatLabel.SetText("正在与 " + p.Name + " 对话")
+	})
 	a.renderHistory(peerID)
 }
 
@@ -513,11 +604,10 @@ func (a *appState) renderHistory(peerID string) {
 		b.WriteString(name)
 		b.WriteString(": ")
 		b.WriteString(m.Text)
-		b.WriteString("\r\n")
+		b.WriteString("\n")
 	}
 	a.safeUI(func() {
 		a.chatView.SetText(b.String())
-		a.chatView.SetTextSelection(len(a.chatView.Text()), len(a.chatView.Text()))
 	})
 }
 
@@ -566,19 +656,22 @@ func (a *appState) pushStatus(text string) {
 }
 
 func (a *appState) safeUI(fn func()) {
-	if a.mw == nil {
+	if a.uiApp == nil {
 		return
 	}
-	a.mw.Synchronize(fn)
+	fyne.Do(fn)
 }
 
 func (a *appState) shutdown() {
-	if a.udpConn != nil {
-		_ = a.udpConn.Close()
-	}
-	if a.tcpListener != nil {
-		_ = a.tcpListener.Close()
-	}
+	a.stopOnce.Do(func() {
+		close(a.stopCh)
+		if a.udpConn != nil {
+			_ = a.udpConn.Close()
+		}
+		if a.tcpListener != nil {
+			_ = a.tcpListener.Close()
+		}
+	})
 }
 
 func sendEnvelope(p peer, env chatEnvelope) error {
@@ -590,7 +683,7 @@ func sendEnvelope(p peer, env chatEnvelope) error {
 		return err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 	return json.NewEncoder(conn).Encode(env)
 }
 
@@ -702,16 +795,4 @@ func randomID(n int) string {
 		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
-}
-
-func runEntry() {
-	exe, err := os.Executable()
-	if err != nil {
-		_ = walk.MsgBox(nil, "LanTalk", "无法获取程序路径: "+err.Error(), walk.MsgBoxIconError)
-		return
-	}
-	app := newApp(filepath.Dir(exe))
-	if err := app.run(); err != nil {
-		_ = walk.MsgBox(nil, "LanTalk", err.Error(), walk.MsgBoxIconError)
-	}
 }
