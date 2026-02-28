@@ -281,7 +281,7 @@ type appState struct {
 	searchInput    *widget.Entry
 	rightHost      *fyne.Container
 	chatPanel      fyne.CanvasObject
-	topInfo        *widget.Label
+	selfAvatar     *canvas.Image
 	chatHeader     *widget.Label
 	chatSubHeader  *widget.Label
 	chatStream     *fyne.Container
@@ -585,17 +585,51 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	)
 	a.contactBox.OnSelected = func(id widget.ListItemID) { a.selectPeer(int(id)) }
 
-	leftHeadTitle := widget.NewLabel("联系人")
-	leftHeadTitle.TextStyle = fyne.TextStyle{Bold: true}
-	leftPanel := container.NewVBox(leftHeadTitle, a.searchInput, a.contactBox)
-	leftCard := widget.NewCard("", "", leftPanel)
-	leftBg := canvas.NewRectangle(color.NRGBA{R: 233, G: 244, B: 255, A: 255})
-	left := container.NewMax(leftBg, container.NewPadded(leftCard))
+	lightGray := color.NRGBA{R: 244, G: 246, B: 248, A: 255}
+	lineGray := color.NRGBA{R: 224, G: 228, B: 233, A: 255}
 
-	a.headerAvatar = avatarImage(a.avatarAbsPath(), 52)
+	a.selfAvatar = avatarImage(a.avatarAbsPath(), 42)
+	settingBtn := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
+		a.openSettingsWindow()
+	})
+	railSize := canvas.NewRectangle(color.Transparent)
+	railSize.SetMinSize(fyne.NewSize(72, 1))
+	leftRail := container.NewMax(
+		railSize,
+		canvas.NewRectangle(color.White),
+		container.NewBorder(
+			container.NewPadded(a.selfAvatar),
+			container.NewPadded(settingBtn),
+			nil,
+			nil,
+			nil,
+		),
+	)
+
+	searchBg := canvas.NewRectangle(color.White)
+	searchBg.CornerRadius = 8
+	searchBar := container.NewMax(
+		searchBg,
+		container.NewPadded(container.NewHBox(widget.NewIcon(theme.SearchIcon()), a.searchInput)),
+	)
+	midSize := canvas.NewRectangle(color.Transparent)
+	midSize.SetMinSize(fyne.NewSize(320, 1))
+	middlePanel := container.NewMax(
+		midSize,
+		canvas.NewRectangle(color.White),
+		container.NewBorder(
+			container.NewVBox(container.NewPadded(searchBar), lineWithColor(lineGray)),
+			nil,
+			nil,
+			nil,
+			a.contactBox,
+		),
+	)
+
+	a.headerAvatar = avatarImage("", 44)
 	a.chatHeader = widget.NewLabel("请选择联系人")
 	a.chatHeader.TextStyle = fyne.TextStyle{Bold: true}
-	a.chatSubHeader = widget.NewLabel("")
+	a.chatSubHeader = widget.NewLabel("离线")
 	profileBtn := widget.NewButtonWithIcon("资料", theme.InfoIcon(), func() { a.openPeerProfileDialog() })
 
 	a.chatStream = container.NewVBox()
@@ -603,20 +637,14 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	a.chatScroll.Direction = container.ScrollVerticalOnly
 
 	a.inputBox = newChatInput(func() { a.sendCurrentText() })
-	a.inputBox.SetMinRowsVisible(6)
+	a.inputBox.SetMinRowsVisible(5)
 	a.inputBox.SetPlaceHolder("输入消息")
 
-	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
-		a.broadcastHello(a.listenPort)
-		go a.probeAutoTargets()
-	})
 	emojiBtn := widget.NewButtonWithIcon("表情", theme.ContentAddIcon(), func() { a.openEmojiPicker() })
-	imageBtn := widget.NewButtonWithIcon("图片", theme.FileImageIcon(), func() { a.sendCurrentImage() })
 	fileBtn := widget.NewButtonWithIcon("文件", theme.FileIcon(), func() { a.sendCurrentFile() })
-	clearBtn := widget.NewButtonWithIcon("", theme.ContentClearIcon(), func() { a.inputBox.SetText("") })
-	sendBtn := widget.NewButtonWithIcon("发送", theme.MailSendIcon(), func() { a.sendCurrentText() })
-	sendBtn.Importance = widget.HighImportance
+	imageBtn := widget.NewButtonWithIcon("图片", theme.FileImageIcon(), func() { a.sendCurrentImage() })
 	a.statusBar = widget.NewLabel("")
+	a.statusBar.Hide()
 
 	headerRow := container.NewHBox(
 		a.headerAvatar,
@@ -624,38 +652,29 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 		layout.NewSpacer(),
 		profileBtn,
 	)
-	actions := container.NewHBox(refreshBtn, emojiBtn, imageBtn, fileBtn, clearBtn)
-	composer := container.NewBorder(
-		nil,
-		a.statusBar,
-		actions,
-		sendBtn,
-		a.inputBox,
-	)
+	actions := container.NewHBox(emojiBtn, fileBtn, imageBtn)
 	a.chatPanel = container.NewBorder(
-		container.NewVBox(container.NewPadded(headerRow), thinLine()),
-		container.NewVBox(thinLine(), container.NewPadded(composer)),
+		container.NewVBox(container.NewPadded(headerRow), lineWithColor(lineGray)),
+		container.NewVBox(
+			lineWithColor(lineGray),
+			container.NewPadded(actions),
+			lineWithColor(lineGray),
+			container.NewPadded(a.inputBox),
+		),
 		nil,
 		nil,
-		container.NewPadded(a.chatScroll),
+		container.NewMax(canvas.NewRectangle(lightGray), container.NewPadded(a.chatScroll)),
 	)
 	a.rightHost = container.NewMax(blankRightPanel())
 
-	split := container.NewHSplit(left, a.rightHost)
-	split.Offset = 0.32
-
-	title := widget.NewLabel("LanTalk")
-	title.TextStyle = fyne.TextStyle{Bold: true}
-	a.topInfo = widget.NewLabel(fmt.Sprintf("%s  ·  %s", a.cfg.Name, shortID(a.cfg.ID)))
-	settingBtn := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
-		a.openSettingsWindow()
-	})
-	topBar := container.NewMax(
-		canvas.NewRectangle(color.NRGBA{R: 53, G: 146, B: 255, A: 255}),
-		container.NewPadded(container.NewHBox(title, layout.NewSpacer(), a.topInfo, settingBtn)),
+	root := container.NewHBox(
+		leftRail,
+		lineWithColor(lineGray),
+		middlePanel,
+		lineWithColor(lineGray),
+		a.rightHost,
 	)
-
-	return container.NewBorder(topBar, nil, nil, nil, split)
+	return container.NewMax(canvas.NewRectangle(lightGray), root)
 }
 
 func (a *appState) openSettingsWindow() {
@@ -717,8 +736,11 @@ func (a *appState) openSettingsWindow() {
 			}
 			a.refreshContacts()
 			a.refreshAvatarViews()
-			if a.topInfo != nil {
-				a.topInfo.SetText(fmt.Sprintf("%s  ·  %s", a.cfg.Name, shortID(a.cfg.ID)))
+			a.mu.Lock()
+			active := a.activeKey
+			a.mu.Unlock()
+			if active != "" {
+				a.refreshHeaderByKey(active)
 			}
 			a.pushStatus("已保存")
 		}
@@ -761,15 +783,21 @@ func (a *appState) avatarAbsPath() string {
 
 func (a *appState) refreshAvatarViews() {
 	path := a.avatarAbsPath()
+	a.mu.Lock()
+	active := a.activeKey
+	a.mu.Unlock()
 	a.safeUI(func() {
 		if a.settingsAvatar != nil {
 			setAvatarImage(a.settingsAvatar, path)
 		}
-		if a.headerAvatar != nil {
-			setAvatarImage(a.headerAvatar, path)
+		if a.selfAvatar != nil {
+			setAvatarImage(a.selfAvatar, path)
 		}
-		if a.chatHeader != nil {
+		if active == "" && a.chatHeader != nil {
 			a.chatHeader.SetText("请选择联系人")
+		}
+		if active == "" && a.chatSubHeader != nil {
+			a.chatSubHeader.SetText("离线")
 		}
 	})
 }
@@ -1740,26 +1768,24 @@ func renderBubbleMessage(m historyLine) fyne.CanvasObject {
 
 	bgColor := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	if outgoing {
-		bgColor = color.NRGBA{R: 217, G: 235, B: 255, A: 255}
+		bgColor = color.NRGBA{R: 248, G: 249, B: 251, A: 255}
 	}
 	bg := canvas.NewRectangle(bgColor)
 	bg.CornerRadius = 10
-	widthHolder := canvas.NewRectangle(color.Transparent)
-	widthHolder.SetMinSize(fyne.NewSize(300, 1))
 	bubble := container.NewMax(
-		widthHolder,
 		bg,
 		container.NewPadded(bodyLabel),
 	)
 
 	var metaRow *fyne.Container
 	var bodyRow *fyne.Container
+	maxGuard := spacerBox(320)
 	if outgoing {
 		metaRow = container.NewHBox(layout.NewSpacer(), metaLabel)
-		bodyRow = container.NewHBox(layout.NewSpacer(), container.NewPadded(bubble), spacerBox(24))
+		bodyRow = container.NewHBox(maxGuard, layout.NewSpacer(), container.NewPadded(bubble), spacerBox(20))
 	} else {
-		metaRow = container.NewHBox(spacerBox(24), metaLabel, layout.NewSpacer())
-		bodyRow = container.NewHBox(spacerBox(24), container.NewPadded(bubble), layout.NewSpacer())
+		metaRow = container.NewHBox(spacerBox(20), metaLabel, layout.NewSpacer())
+		bodyRow = container.NewHBox(spacerBox(20), container.NewPadded(bubble), layout.NewSpacer(), maxGuard)
 	}
 	return container.NewVBox(metaRow, bodyRow)
 }
@@ -1770,8 +1796,8 @@ func spacerBox(w float32) *canvas.Rectangle {
 	return box
 }
 
-func thinLine() *canvas.Rectangle {
-	line := canvas.NewRectangle(color.NRGBA{R: 220, G: 227, B: 236, A: 255})
+func lineWithColor(c color.Color) *canvas.Rectangle {
+	line := canvas.NewRectangle(c)
 	line.SetMinSize(fyne.NewSize(1, 1))
 	return line
 }
