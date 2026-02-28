@@ -40,17 +40,18 @@ import (
 )
 
 const (
-	discoveryPort          = 43999
-	discoveryHost          = "239.255.77.77"
-	defaultChatPort        = 44000
-	presenceTTL            = 20 * time.Second
-	announceEvery          = 3 * time.Second
-	autoProbeEvery         = 10 * time.Second
-	scanBatchSize          = 220
-	probeParallelism       = 24
-	maxEnvelopeBytes       = 1 << 20
-	fileChunkBytes         = 1 << 20
-	maxFileBytes     int64 = 100 * 1024 * 1024 * 1024
+	discoveryPort           = 43999
+	discoveryHost           = "239.255.77.77"
+	defaultChatPort         = 44000
+	presenceTTL             = 20 * time.Second
+	announceEvery           = 3 * time.Second
+	autoProbeEvery          = 10 * time.Second
+	scanBatchSize           = 220
+	probeParallelism        = 24
+	maxEnvelopeBytes        = 1 << 20
+	fileChunkBytes          = 1 << 20
+	maxFileBytes      int64 = 100 * 1024 * 1024 * 1024
+	maxBubbleHanChars       = 25
 )
 
 type config struct {
@@ -1762,8 +1763,25 @@ func (a *appState) renderBubbleMessage(m historyLine) fyne.CanvasObject {
 	}
 
 	metaLabel := widget.NewLabel(meta)
-	bodyLabel := widget.NewLabel(m.Text)
-	bodyLabel.Wrapping = fyne.TextWrapWord
+	textStyle := fyne.TextStyle{}
+	textSize := theme.TextSize()
+	maxContentWidth := fyne.MeasureText(strings.Repeat("汉", maxBubbleHanChars), textSize, textStyle).Width
+	if a.chatScroll != nil {
+		if w := a.chatScroll.Size().Width; w > 0 {
+			limit := w - 100
+			if limit > 0 && limit < maxContentWidth {
+				maxContentWidth = limit
+			}
+		}
+	}
+	minContentWidth := fyne.MeasureText("汉", textSize, textStyle).Width
+	if maxContentWidth < minContentWidth {
+		maxContentWidth = minContentWidth
+	}
+	wrapped := wrapTextByPixel(m.Text, maxContentWidth, textSize, textStyle)
+	contentWidth := maxLinePixelWidth(wrapped, textSize, textStyle)
+	bodyLabel := widget.NewLabel(wrapped)
+	bodyLabel.Wrapping = fyne.TextWrapOff
 
 	bgColor := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	if outgoing {
@@ -1771,39 +1789,65 @@ func (a *appState) renderBubbleMessage(m historyLine) fyne.CanvasObject {
 	}
 	bg := canvas.NewRectangle(bgColor)
 	bg.CornerRadius = 10
+	innerPad := theme.Size(theme.SizeNamePadding)
+	widthHolder := canvas.NewRectangle(color.Transparent)
+	widthHolder.SetMinSize(fyne.NewSize(contentWidth+innerPad*2, 1))
 	bubble := container.NewMax(
+		widthHolder,
 		bg,
 		container.NewPadded(bodyLabel),
 	)
 
 	var metaRow *fyne.Container
 	var bodyRow *fyne.Container
-	guard := float32(260)
-	if a.chatScroll != nil {
-		if w := a.chatScroll.Size().Width; w > 0 {
-			maxBubble := w * 0.68
-			if maxBubble > 560 {
-				maxBubble = 560
-			}
-			if maxBubble < 220 {
-				maxBubble = 220
-			}
-			if g := w - maxBubble - 40; g > 0 {
-				guard = g
-			} else {
-				guard = 0
-			}
-		}
-	}
-	maxGuard := spacerBox(guard)
 	if outgoing {
 		metaRow = container.NewHBox(layout.NewSpacer(), metaLabel)
-		bodyRow = container.NewHBox(maxGuard, layout.NewSpacer(), container.NewPadded(bubble), spacerBox(20))
+		bodyRow = container.NewHBox(layout.NewSpacer(), container.NewPadded(bubble), spacerBox(20))
 	} else {
 		metaRow = container.NewHBox(spacerBox(20), metaLabel, layout.NewSpacer())
-		bodyRow = container.NewHBox(spacerBox(20), container.NewPadded(bubble), layout.NewSpacer(), maxGuard)
+		bodyRow = container.NewHBox(spacerBox(20), container.NewPadded(bubble), layout.NewSpacer())
 	}
 	return container.NewVBox(metaRow, bodyRow)
+}
+
+func wrapTextByPixel(text string, maxWidth, textSize float32, style fyne.TextStyle) string {
+	if text == "" {
+		return ""
+	}
+	segments := strings.Split(text, "\n")
+	lines := make([]string, 0, len(segments))
+	for _, seg := range segments {
+		if seg == "" {
+			lines = append(lines, "")
+			continue
+		}
+		line := make([]rune, 0, len(seg))
+		for _, r := range seg {
+			candidate := append(append([]rune{}, line...), r)
+			if len(line) > 0 && fyne.MeasureText(string(candidate), textSize, style).Width > maxWidth {
+				lines = append(lines, string(line))
+				line = []rune{r}
+			} else {
+				line = candidate
+			}
+		}
+		lines = append(lines, string(line))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func maxLinePixelWidth(text string, textSize float32, style fyne.TextStyle) float32 {
+	maxW := float32(0)
+	for _, line := range strings.Split(text, "\n") {
+		w := fyne.MeasureText(line, textSize, style).Width
+		if w > maxW {
+			maxW = w
+		}
+	}
+	if maxW == 0 {
+		return fyne.MeasureText(" ", textSize, style).Width
+	}
+	return maxW
 }
 
 func spacerBox(w float32) *canvas.Rectangle {
