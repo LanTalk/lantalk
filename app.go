@@ -30,13 +30,19 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
+	"golang.org/x/net/ipv4"
 )
 
 const (
-	discoveryPort = 43999
-	discoveryHost = "239.255.77.77"
-	presenceTTL   = 15 * time.Second
-	announceEvery = 3 * time.Second
+	discoveryPort   = 43999
+	discoveryHost   = "239.255.77.77"
+	defaultChatPort = 44000
+	presenceTTL     = 20 * time.Second
+	announceEvery   = 3 * time.Second
+	autoProbeEvery  = 10 * time.Second
+	scanBatchSize   = 220
+	maxFileBytes    = 8 << 20
+	maxFrameBytes   = 20 << 20
 )
 
 type config struct {
@@ -47,27 +53,34 @@ type config struct {
 }
 
 type peer struct {
-	ID        string
-	Name      string
-	Addr      string
-	Port      int
-	PublicKey string
-	LastSeen  time.Time
+	Key        string
+	ID         string
+	InstanceID string
+	Name       string
+	Addr       string
+	Port       int
+	PublicKey  string
+	LastSeen   time.Time
 }
 
 type discoveryPacket struct {
-	Type      string `json:"type"`
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	PublicKey string `json:"publicKey"`
-	Port      int    `json:"port"`
-	Time      int64  `json:"time"`
+	Type       string `json:"type"`
+	ID         string `json:"id"`
+	InstanceID string `json:"instanceId"`
+	Name       string `json:"name"`
+	PublicKey  string `json:"publicKey"`
+	Port       int    `json:"port"`
+	Time       int64  `json:"time"`
 }
 
-type plainMessage struct {
-	ID     string `json:"id"`
-	Text   string `json:"text"`
-	SentAt int64  `json:"sentAt"`
+type plainPayload struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Text     string `json:"text,omitempty"`
+	FileName string `json:"fileName,omitempty"`
+	FileData string `json:"fileData,omitempty"`
+	FileSize int64  `json:"fileSize,omitempty"`
+	SentAt   int64  `json:"sentAt"`
 }
 
 type encryptedMessage struct {
@@ -77,11 +90,13 @@ type encryptedMessage struct {
 }
 
 type chatEnvelope struct {
-	Type       string           `json:"type"`
-	FromID     string           `json:"fromId"`
-	FromName   string           `json:"fromName"`
-	FromPubKey string           `json:"fromPubKey"`
-	Payload    encryptedMessage `json:"payload"`
+	Type         string           `json:"type"`
+	FromID       string           `json:"fromId"`
+	FromInstance string           `json:"fromInstance"`
+	FromName     string           `json:"fromName"`
+	FromPubKey   string           `json:"fromPubKey"`
+	Port         int              `json:"port,omitempty"`
+	Payload      encryptedMessage `json:"payload"`
 }
 
 type historyLine struct {
@@ -106,53 +121,54 @@ func (oldQQTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) col
 	}
 }
 
-func (oldQQTheme) Font(style fyne.TextStyle) fyne.Resource {
-	return theme.DefaultTheme().Font(style)
-}
-
-func (oldQQTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
-	return theme.DefaultTheme().Icon(name)
-}
-
-func (oldQQTheme) Size(name fyne.ThemeSizeName) float32 {
-	return theme.DefaultTheme().Size(name)
-}
+func (oldQQTheme) Font(style fyne.TextStyle) fyne.Resource    { return theme.DefaultTheme().Font(style) }
+func (oldQQTheme) Icon(name fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(name) }
+func (oldQQTheme) Size(name fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(name) }
 
 type appState struct {
-	baseDir  string
-	dataDir  string
-	chatsDir string
-	cfg      config
+	baseDir      string
+	dataDir      string
+	chatsDir     string
+	downloadsDir string
+	instanceID   string
+	listenPort   int
+	cfg          config
 
 	mu         sync.Mutex
 	peers      map[string]*peer
-	peerIDs    []string
+	peerKeys   []string
 	peerTitles []string
-	active     string
+	peerFilter string
+	activeKey  string
+	scanOffset int
 
 	tcpListener net.Listener
 	udpConn     *net.UDPConn
 	stopOnce    sync.Once
 	stopCh      chan struct{}
 
-	uiApp      fyne.App
-	win        fyne.Window
-	contactBox *widget.List
-	nameInput  *widget.Entry
-	selfLabel  *widget.Label
-	chatLabel  *widget.Label
-	chatView   *widget.Entry
-	inputBox   *widget.Entry
-	statusBar  *widget.Label
+	uiApp        fyne.App
+	win          fyne.Window
+	contactBox   *widget.List
+	searchInput  *widget.Entry
+	nameInput    *widget.Entry
+	selfLabel    *widget.Label
+	chatLabel    *widget.Label
+	chatSubLabel *widget.Label
+	chatView     *widget.Entry
+	inputBox     *widget.Entry
+	statusBar    *widget.Label
 }
 
 func newApp(baseDir string) *appState {
 	return &appState{
-		baseDir:  baseDir,
-		dataDir:  filepath.Join(baseDir, "data"),
-		chatsDir: filepath.Join(baseDir, "data", "chats"),
-		peers:    map[string]*peer{},
-		stopCh:   make(chan struct{}),
+		baseDir:      baseDir,
+		dataDir:      filepath.Join(baseDir, "data"),
+		chatsDir:     filepath.Join(baseDir, "data", "chats"),
+		downloadsDir: filepath.Join(baseDir, "data", "downloads"),
+		instanceID:   randomID(4),
+		peers:        map[string]*peer{},
+		stopCh:       make(chan struct{}),
 	}
 }
 
@@ -176,10 +192,11 @@ func (a *appState) run() error {
 	if err != nil {
 		return err
 	}
+	a.listenPort = port
 	if err := a.startDiscovery(port); err != nil {
 		return err
 	}
-	a.pushStatus("已启动，正在发现局域网好友")
+	a.pushStatus(fmt.Sprintf("已启动: TCP %d | 自动发现: 组播 + 广播 + 自动探测", port))
 
 	a.win.ShowAndRun()
 	a.shutdown()
@@ -188,6 +205,9 @@ func (a *appState) run() error {
 
 func (a *appState) initStorage() error {
 	if err := os.MkdirAll(a.chatsDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(a.downloadsDir, 0o755); err != nil {
 		return err
 	}
 	cfgPath := filepath.Join(a.dataDir, "config.json")
@@ -211,12 +231,7 @@ func (a *appState) initStorage() error {
 	if err != nil {
 		return err
 	}
-	a.cfg = config{
-		ID:         randomID(8),
-		Name:       host,
-		PublicKey:  pub,
-		PrivateKey: priv,
-	}
+	a.cfg = config{ID: randomID(8), Name: host, PublicKey: pub, PrivateKey: priv}
 	return a.saveConfig()
 }
 
@@ -232,13 +247,14 @@ func (a *appState) buildUI() error {
 	a.uiApp = app.NewWithID("lantalk")
 	a.uiApp.Settings().SetTheme(oldQQTheme{})
 	a.win = a.uiApp.NewWindow("LanTalk - 经典局域网聊天")
-	a.win.Resize(fyne.NewSize(980, 680))
+	a.win.Resize(fyne.NewSize(1080, 720))
 
-	a.selfLabel = widget.NewLabel("昵称: " + a.cfg.Name)
+	a.selfLabel = widget.NewLabel(a.selfText())
 	a.selfLabel.TextStyle = fyne.TextStyle{Bold: true}
 
 	a.nameInput = widget.NewEntry()
 	a.nameInput.SetText(a.cfg.Name)
+	a.nameInput.SetPlaceHolder("输入昵称")
 	saveNameBtn := widget.NewButton("保存昵称", func() {
 		name := strings.TrimSpace(a.nameInput.Text)
 		if name == "" {
@@ -249,15 +265,24 @@ func (a *appState) buildUI() error {
 			dialog.ShowError(err, a.win)
 			return
 		}
-		a.selfLabel.SetText("昵称: " + a.cfg.Name)
+		a.selfLabel.SetText(a.selfText())
 		a.pushStatus("昵称已更新")
 	})
+
+	a.searchInput = widget.NewEntry()
+	a.searchInput.SetPlaceHolder("搜索好友(昵称/IP)")
+	a.searchInput.OnChanged = func(v string) {
+		a.mu.Lock()
+		a.peerFilter = strings.TrimSpace(v)
+		a.mu.Unlock()
+		a.refreshContacts()
+	}
 
 	a.contactBox = widget.NewList(
 		func() int {
 			a.mu.Lock()
 			defer a.mu.Unlock()
-			return len(a.peerIDs)
+			return len(a.peerKeys)
 		},
 		func() fyne.CanvasObject {
 			lbl := widget.NewLabel("")
@@ -274,12 +299,11 @@ func (a *appState) buildUI() error {
 			obj.(*widget.Label).SetText(text)
 		},
 	)
-	a.contactBox.OnSelected = func(id widget.ListItemID) {
-		a.selectPeer(int(id))
-	}
+	a.contactBox.OnSelected = func(id widget.ListItemID) { a.selectPeer(int(id)) }
 
-	a.chatLabel = widget.NewLabel("请选择左侧好友开始聊天")
+	a.chatLabel = widget.NewLabel("请选择左侧好友")
 	a.chatLabel.TextStyle = fyne.TextStyle{Bold: true}
+	a.chatSubLabel = widget.NewLabel("提示: 同机双开可互测；跨子网依赖自动探测")
 
 	a.chatView = widget.NewMultiLineEntry()
 	a.chatView.Disable()
@@ -288,53 +312,60 @@ func (a *appState) buildUI() error {
 
 	a.inputBox = widget.NewMultiLineEntry()
 	a.inputBox.Wrapping = fyne.TextWrapWord
-	a.inputBox.SetMinRowsVisible(5)
+	a.inputBox.SetMinRowsVisible(6)
+	a.inputBox.SetPlaceHolder("输入消息，回车换行")
 
-	sendBtn := widget.NewButton("发送", func() {
-		a.sendCurrentText()
+	refreshBtn := widget.NewButton("刷新发现", func() {
+		a.broadcastHello(a.listenPort)
+		go a.probeAutoTargets()
+		a.pushStatus("已触发主动发现")
 	})
+	fileBtn := widget.NewButton("发送文件", func() { a.sendCurrentFile() })
+	clearBtn := widget.NewButton("清空输入", func() { a.inputBox.SetText("") })
+	sendBtn := widget.NewButton("发送消息", func() { a.sendCurrentText() })
 
 	a.statusBar = widget.NewLabel("准备就绪")
 
 	headerBg := canvas.NewRectangle(color.NRGBA{R: 56, G: 142, B: 255, A: 255})
 	headerTitle := widget.NewLabel("LanTalk")
 	headerTitle.TextStyle = fyne.TextStyle{Bold: true}
-	headerTitle.Importance = widget.HighImportance
-	header := container.NewMax(
-		headerBg,
-		container.NewPadded(container.NewVBox(headerTitle, a.selfLabel)),
-	)
+	header := container.NewMax(headerBg, container.NewPadded(container.NewVBox(headerTitle, a.selfLabel)))
 
-	leftTop := container.NewVBox(
-		header,
-		a.nameInput,
-		saveNameBtn,
-		widget.NewSeparator(),
-		widget.NewLabel("在线好友"),
-	)
-	leftPane := container.NewBorder(leftTop, nil, nil, nil, a.contactBox)
+	profileCard := widget.NewCard("账号", "本地身份信息", container.NewVBox(a.nameInput, saveNameBtn))
+	discoveryCard := widget.NewCard("自动发现", "组播 + 广播 + 自动端口探测（无需手动添加）", container.NewVBox(a.searchInput, a.contactBox))
+	leftPane := container.NewVBox(header, profileCard, discoveryCard)
 	leftBg := canvas.NewRectangle(color.NRGBA{R: 232, G: 243, B: 255, A: 255})
 	left := container.NewMax(leftBg, container.NewPadded(leftPane))
 
 	chatSplit := container.NewVSplit(a.chatView, a.inputBox)
 	chatSplit.Offset = 0.78
-	rightBottom := container.NewVBox(
-		container.NewHBox(layout.NewSpacer(), sendBtn),
-		a.statusBar,
-	)
-	right := container.NewBorder(a.chatLabel, rightBottom, nil, nil, chatSplit)
-	right = container.NewPadded(right)
+	actions := container.NewHBox(refreshBtn, fileBtn, clearBtn, layout.NewSpacer(), sendBtn)
+	headerRight := container.NewVBox(a.chatLabel, a.chatSubLabel)
+	rightBody := container.NewBorder(headerRight, container.NewVBox(actions, a.statusBar), nil, nil, chatSplit)
+	right := container.NewPadded(rightBody)
 
 	hSplit := container.NewHSplit(left, right)
-	hSplit.Offset = 0.28
+	hSplit.Offset = 0.34
 	a.win.SetContent(hSplit)
+	a.win.SetCloseIntercept(func() {
+		a.shutdown()
+		a.win.Close()
+	})
 	return nil
 }
 
+func (a *appState) selfText() string {
+	return fmt.Sprintf("昵称: %s | ID: %s | 实例: %s", a.cfg.Name, shortID(a.cfg.ID), shortID(a.instanceID))
+}
+
 func (a *appState) startTCPServer() (int, error) {
-	ln, err := net.Listen("tcp4", "0.0.0.0:0")
+	listenAt := fmt.Sprintf("0.0.0.0:%d", defaultChatPort)
+	ln, err := net.Listen("tcp4", listenAt)
 	if err != nil {
-		return 0, err
+		ln, err = net.Listen("tcp4", "0.0.0.0:0")
+		if err != nil {
+			return 0, err
+		}
 	}
 	a.tcpListener = ln
 	go func() {
@@ -352,30 +383,89 @@ func (a *appState) startTCPServer() (int, error) {
 func (a *appState) handleTCPConn(conn net.Conn) {
 	defer conn.Close()
 	var env chatEnvelope
-	dec := json.NewDecoder(io.LimitReader(conn, 1<<20))
-	if err := dec.Decode(&env); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, maxFrameBytes)).Decode(&env); err != nil {
 		return
 	}
-	if env.Type != "chat" || env.FromID == a.cfg.ID || env.FromPubKey == "" {
-		return
-	}
-
 	host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+
+	switch env.Type {
+	case "probe":
+		a.handleProbe(conn, host, env)
+	case "chat":
+		a.handleChat(host, env)
+	}
+}
+
+func (a *appState) handleProbe(conn net.Conn, host string, env chatEnvelope) {
+	if env.FromID != "" && env.FromPubKey != "" && env.FromInstance != a.instanceID {
+		a.upsertPeer(peer{
+			Key:        makePeerKey(env.FromID, env.FromInstance),
+			ID:         env.FromID,
+			InstanceID: env.FromInstance,
+			Name:       env.FromName,
+			Addr:       host,
+			Port:       env.Port,
+			PublicKey:  env.FromPubKey,
+			LastSeen:   time.Now(),
+		})
+	}
+	ack := chatEnvelope{
+		Type:         "probe_ack",
+		FromID:       a.cfg.ID,
+		FromInstance: a.instanceID,
+		FromName:     a.cfg.Name,
+		FromPubKey:   a.cfg.PublicKey,
+		Port:         a.listenPort,
+	}
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	_ = json.NewEncoder(conn).Encode(ack)
+}
+
+func (a *appState) handleChat(host string, env chatEnvelope) {
+	if env.FromPubKey == "" || env.FromInstance == a.instanceID {
+		return
+	}
+	peerKey := makePeerKey(env.FromID, env.FromInstance)
 	a.upsertPeer(peer{
-		ID:        env.FromID,
-		Name:      env.FromName,
-		Addr:      host,
-		PublicKey: env.FromPubKey,
-		LastSeen:  time.Now(),
+		Key:        peerKey,
+		ID:         env.FromID,
+		InstanceID: env.FromInstance,
+		Name:       env.FromName,
+		Addr:       host,
+		Port:       env.Port,
+		PublicKey:  env.FromPubKey,
+		LastSeen:   time.Now(),
 	})
 
-	plain, err := decrypt(env.FromPubKey, a.cfg.PrivateKey, env.Payload)
+	payload, err := decrypt(env.FromPubKey, a.cfg.PrivateKey, env.Payload)
 	if err != nil {
 		return
 	}
-	line := historyLine{Direction: "in", From: env.FromName, Text: plain.Text, SentAt: plain.SentAt}
-	a.appendHistory(env.FromID, line)
-	a.refreshChatIfActive(env.FromID)
+	if payload.SentAt == 0 {
+		payload.SentAt = time.Now().Unix()
+	}
+
+	display := ""
+	switch payload.Kind {
+	case "", "text":
+		display = payload.Text
+	case "file":
+		msg, err := a.saveIncomingFile(payload)
+		if err != nil {
+			display = "[文件接收失败] " + err.Error()
+		} else {
+			display = msg
+		}
+	default:
+		display = "[未知消息类型]"
+	}
+	if strings.TrimSpace(display) == "" {
+		return
+	}
+
+	line := historyLine{Direction: "in", From: env.FromName, Text: display, SentAt: payload.SentAt}
+	a.appendHistory(peerKey, line)
+	a.refreshChatIfActive(peerKey)
 }
 
 func (a *appState) sendCurrentText() {
@@ -383,47 +473,104 @@ func (a *appState) sendCurrentText() {
 	if text == "" {
 		return
 	}
-	a.mu.Lock()
-	peerID := a.active
-	p := a.peers[peerID]
-	a.mu.Unlock()
-	if peerID == "" || p == nil {
+	peerKey, p, ok := a.getActivePeer()
+	if !ok {
 		a.pushStatus("请先选择在线好友")
 		return
 	}
-
-	plain := plainMessage{ID: randomID(8), Text: text, SentAt: time.Now().Unix()}
-	payload, err := encrypt(p.PublicKey, a.cfg.PrivateKey, plain)
-	if err != nil {
-		a.pushStatus("加密失败: " + err.Error())
-		return
-	}
-	env := chatEnvelope{
-		Type:       "chat",
-		FromID:     a.cfg.ID,
-		FromName:   a.cfg.Name,
-		FromPubKey: a.cfg.PublicKey,
-		Payload:    payload,
-	}
-	if err := sendEnvelope(*p, env); err != nil {
+	payload := plainPayload{ID: randomID(8), Kind: "text", Text: text, SentAt: time.Now().Unix()}
+	if err := a.sendPayload(peerKey, p, payload, text); err != nil {
 		a.pushStatus("发送失败: " + err.Error())
 		return
 	}
-
 	a.inputBox.SetText("")
-	a.appendHistory(peerID, historyLine{Direction: "out", From: a.cfg.Name, Text: text, SentAt: plain.SentAt})
-	a.refreshChatIfActive(peerID)
+}
+
+func (a *appState) sendCurrentFile() {
+	peerKey, p, ok := a.getActivePeer()
+	if !ok {
+		a.pushStatus("请先选择在线好友")
+		return
+	}
+	dialog.ShowFileOpen(func(rc fyne.URIReadCloser, err error) {
+		if err != nil {
+			a.pushStatus("打开文件失败")
+			return
+		}
+		if rc == nil {
+			return
+		}
+		defer rc.Close()
+
+		name := filepath.Base(rc.URI().Path())
+		if name == "" || name == "." {
+			name = "file.bin"
+		}
+		data, err := io.ReadAll(io.LimitReader(rc, maxFileBytes+1))
+		if err != nil {
+			a.pushStatus("读取文件失败")
+			return
+		}
+		if len(data) > maxFileBytes {
+			a.pushStatus("文件过大，最大 8MB")
+			return
+		}
+		payload := plainPayload{
+			ID:       randomID(8),
+			Kind:     "file",
+			FileName: sanitizeFilename(name),
+			FileData: base64.StdEncoding.EncodeToString(data),
+			FileSize: int64(len(data)),
+			SentAt:   time.Now().Unix(),
+		}
+		historyText := fmt.Sprintf("[文件] %s (%s) 已发送", payload.FileName, humanSize(payload.FileSize))
+		if err := a.sendPayload(peerKey, p, payload, historyText); err != nil {
+			a.pushStatus("发送文件失败: " + err.Error())
+		}
+	}, a.win)
+}
+
+func (a *appState) sendPayload(peerKey string, p peer, payload plainPayload, historyText string) error {
+	payloadEnc, err := encrypt(p.PublicKey, a.cfg.PrivateKey, payload)
+	if err != nil {
+		return err
+	}
+	env := chatEnvelope{
+		Type:         "chat",
+		FromID:       a.cfg.ID,
+		FromInstance: a.instanceID,
+		FromName:     a.cfg.Name,
+		FromPubKey:   a.cfg.PublicKey,
+		Port:         a.listenPort,
+		Payload:      payloadEnc,
+	}
+	if err := sendEnvelope(p, env); err != nil {
+		return err
+	}
+	line := historyLine{Direction: "out", From: a.cfg.Name, Text: historyText, SentAt: payload.SentAt}
+	a.appendHistory(peerKey, line)
+	a.refreshChatIfActive(peerKey)
 	a.pushStatus("已发送")
+	return nil
 }
 
 func (a *appState) startDiscovery(chatPort int) error {
-	group := &net.UDPAddr{IP: net.ParseIP(discoveryHost), Port: discoveryPort}
-	conn, err := net.ListenMulticastUDP("udp4", nil, group)
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: discoveryPort})
 	if err != nil {
 		return err
 	}
 	_ = conn.SetReadBuffer(64 * 1024)
 	a.udpConn = conn
+
+	pc := ipv4.NewPacketConn(conn)
+	ifaces, _ := net.Interfaces()
+	for i := range ifaces {
+		iface := ifaces[i]
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		_ = pc.JoinGroup(&iface, &net.UDPAddr{IP: net.ParseIP(discoveryHost)})
+	}
 
 	go func() {
 		buf := make([]byte, 4096)
@@ -436,16 +583,18 @@ func (a *appState) startDiscovery(chatPort int) error {
 			if err := json.Unmarshal(buf[:n], &p); err != nil {
 				continue
 			}
-			if p.Type != "hello" || p.ID == a.cfg.ID || p.PublicKey == "" {
+			if p.Type != "hello" || p.ID == "" || p.PublicKey == "" || p.InstanceID == a.instanceID {
 				continue
 			}
 			a.upsertPeer(peer{
-				ID:        p.ID,
-				Name:      p.Name,
-				Addr:      addr.IP.String(),
-				Port:      p.Port,
-				PublicKey: p.PublicKey,
-				LastSeen:  time.Now(),
+				Key:        makePeerKey(p.ID, p.InstanceID),
+				ID:         p.ID,
+				InstanceID: p.InstanceID,
+				Name:       p.Name,
+				Addr:       addr.IP.String(),
+				Port:       p.Port,
+				PublicKey:  p.PublicKey,
+				LastSeen:   time.Now(),
 			})
 		}
 	}()
@@ -472,12 +621,12 @@ func (a *appState) startDiscovery(chatPort int) error {
 				changed := false
 				now := time.Now()
 				a.mu.Lock()
-				for id, p := range a.peers {
+				for key, p := range a.peers {
 					if now.Sub(p.LastSeen) > presenceTTL {
-						delete(a.peers, id)
+						delete(a.peers, key)
 						changed = true
-						if a.active == id {
-							a.active = ""
+						if a.activeKey == key {
+							a.activeKey = ""
 						}
 					}
 				}
@@ -491,52 +640,184 @@ func (a *appState) startDiscovery(chatPort int) error {
 		}
 	}()
 
+	go func() {
+		ticker := time.NewTicker(autoProbeEvery)
+		defer ticker.Stop()
+		for {
+			a.probeAutoTargets()
+			select {
+			case <-ticker.C:
+			case <-a.stopCh:
+				return
+			}
+		}
+	}()
+
+	a.probeAutoTargets()
 	return nil
 }
 
 func (a *appState) broadcastHello(chatPort int) {
 	pkt := discoveryPacket{
-		Type:      "hello",
-		ID:        a.cfg.ID,
-		Name:      a.cfg.Name,
-		PublicKey: a.cfg.PublicKey,
-		Port:      chatPort,
-		Time:      time.Now().Unix(),
+		Type:       "hello",
+		ID:         a.cfg.ID,
+		InstanceID: a.instanceID,
+		Name:       a.cfg.Name,
+		PublicKey:  a.cfg.PublicKey,
+		Port:       chatPort,
+		Time:       time.Now().Unix(),
 	}
 	b, _ := json.Marshal(pkt)
-	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(discoveryHost), Port: discoveryPort})
+
+	targets := []net.IP{net.ParseIP(discoveryHost), net.IPv4bcast}
+	targets = append(targets, localDirectedBroadcasts()...)
+	for _, ip := range targets {
+		if ip == nil {
+			continue
+		}
+		conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: ip, Port: discoveryPort})
+		if err != nil {
+			continue
+		}
+		_, _ = conn.Write(b)
+		_ = conn.Close()
+	}
+}
+
+func (a *appState) probeAutoTargets() {
+	targets := a.collectAutoProbeTargets()
+	for _, t := range targets {
+		_ = a.probeTarget(t)
+	}
+}
+
+func (a *appState) collectAutoProbeTargets() []string {
+	set := map[string]struct{}{}
+
+	a.mu.Lock()
+	for _, p := range a.peers {
+		if p.Addr == "" {
+			continue
+		}
+		port := p.Port
+		if port == 0 {
+			port = defaultChatPort
+		}
+		set[fmt.Sprintf("%s:%d", p.Addr, port)] = struct{}{}
+		set[fmt.Sprintf("%s:%d", p.Addr, defaultChatPort)] = struct{}{}
+	}
+	a.mu.Unlock()
+
+	for _, ip := range localIPv4Addrs() {
+		if !isPrivateIPv4(ip) {
+			continue
+		}
+		for delta := -1; delta <= 1; delta++ {
+			third := int(ip[2]) + delta
+			if third < 0 || third > 255 {
+				continue
+			}
+			for host := 1; host <= 254; host++ {
+				if delta == 0 && host == int(ip[3]) {
+					continue
+				}
+				target := fmt.Sprintf("%d.%d.%d.%d:%d", ip[0], ip[1], third, host, defaultChatPort)
+				set[target] = struct{}{}
+			}
+		}
+	}
+
+	all := make([]string, 0, len(set))
+	for t := range set {
+		all = append(all, t)
+	}
+	sort.Strings(all)
+	if len(all) <= scanBatchSize {
+		return all
+	}
+
+	a.mu.Lock()
+	start := a.scanOffset % len(all)
+	a.scanOffset = (a.scanOffset + scanBatchSize) % len(all)
+	a.mu.Unlock()
+
+	batch := make([]string, 0, scanBatchSize)
+	for i := 0; i < scanBatchSize; i++ {
+		batch = append(batch, all[(start+i)%len(all)])
+	}
+	return batch
+}
+
+func (a *appState) probeTarget(target string) error {
+	conn, err := net.DialTimeout("tcp4", target, 350*time.Millisecond)
 	if err != nil {
-		return
+		return err
 	}
 	defer conn.Close()
-	_, _ = conn.Write(b)
+	_ = conn.SetDeadline(time.Now().Add(900 * time.Millisecond))
+
+	probe := chatEnvelope{
+		Type:         "probe",
+		FromID:       a.cfg.ID,
+		FromInstance: a.instanceID,
+		FromName:     a.cfg.Name,
+		FromPubKey:   a.cfg.PublicKey,
+		Port:         a.listenPort,
+	}
+	if err := json.NewEncoder(conn).Encode(probe); err != nil {
+		return err
+	}
+
+	var ack chatEnvelope
+	if err := json.NewDecoder(io.LimitReader(conn, 1<<20)).Decode(&ack); err != nil {
+		return err
+	}
+	if ack.Type != "probe_ack" || ack.FromID == "" || ack.FromPubKey == "" || ack.FromInstance == a.instanceID {
+		return errors.New("invalid ack")
+	}
+
+	host, _, _ := net.SplitHostPort(target)
+	a.upsertPeer(peer{
+		Key:        makePeerKey(ack.FromID, ack.FromInstance),
+		ID:         ack.FromID,
+		InstanceID: ack.FromInstance,
+		Name:       ack.FromName,
+		Addr:       host,
+		Port:       ack.Port,
+		PublicKey:  ack.FromPubKey,
+		LastSeen:   time.Now(),
+	})
+	return nil
 }
 
 func (a *appState) upsertPeer(in peer) {
-	if in.ID == "" || in.ID == a.cfg.ID {
+	if in.Key == "" {
+		in.Key = makePeerKey(in.ID, in.InstanceID)
+	}
+	if in.Key == makePeerKey(a.cfg.ID, a.instanceID) || in.PublicKey == "" {
 		return
 	}
+	if in.Name == "" {
+		in.Name = in.ID
+	}
 	a.mu.Lock()
-	exist := a.peers[in.ID]
+	exist := a.peers[in.Key]
 	if exist != nil && exist.PublicKey != "" && exist.PublicKey != in.PublicKey {
 		a.mu.Unlock()
 		return
 	}
-	copyPeer := in
-	if strings.TrimSpace(copyPeer.Name) == "" {
-		copyPeer.Name = in.ID
-	}
-	if exist != nil {
-		exist.Name = copyPeer.Name
-		if copyPeer.Addr != "" {
-			exist.Addr = copyPeer.Addr
-		}
-		if copyPeer.Port != 0 {
-			exist.Port = copyPeer.Port
-		}
-		exist.LastSeen = copyPeer.LastSeen
+	if exist == nil {
+		copyPeer := in
+		a.peers[in.Key] = &copyPeer
 	} else {
-		a.peers[in.ID] = &copyPeer
+		exist.Name = in.Name
+		if in.Addr != "" {
+			exist.Addr = in.Addr
+		}
+		if in.Port != 0 {
+			exist.Port = in.Port
+		}
+		exist.LastSeen = in.LastSeen
 	}
 	a.mu.Unlock()
 	a.refreshContacts()
@@ -548,50 +829,75 @@ func (a *appState) refreshContacts() {
 	for _, p := range a.peers {
 		pairs = append(pairs, p)
 	}
+	filter := strings.ToLower(strings.TrimSpace(a.peerFilter))
 	a.mu.Unlock()
 
 	sort.Slice(pairs, func(i, j int) bool {
+		if strings.ToLower(pairs[i].Name) == strings.ToLower(pairs[j].Name) {
+			return pairs[i].Addr < pairs[j].Addr
+		}
 		return strings.ToLower(pairs[i].Name) < strings.ToLower(pairs[j].Name)
 	})
 
-	ids := make([]string, 0, len(pairs))
+	keys := make([]string, 0, len(pairs))
 	titles := make([]string, 0, len(pairs))
 	for _, p := range pairs {
-		ids = append(ids, p.ID)
-		titles = append(titles, fmt.Sprintf("%s  (%s)", p.Name, p.Addr))
+		show := strings.ToLower(p.Name + " " + p.Addr + " " + p.ID)
+		if filter != "" && !strings.Contains(show, filter) {
+			continue
+		}
+		displayName := p.Name
+		if p.ID == a.cfg.ID {
+			displayName += " [本机实例]"
+		}
+		title := fmt.Sprintf("%s\n%s:%d  #%s", displayName, p.Addr, p.Port, shortID(p.InstanceID))
+		keys = append(keys, p.Key)
+		titles = append(titles, title)
 	}
 
 	a.mu.Lock()
-	a.peerIDs = ids
+	a.peerKeys = keys
 	a.peerTitles = titles
 	a.mu.Unlock()
 
-	a.safeUI(func() {
-		a.contactBox.Refresh()
-	})
+	a.safeUI(func() { a.contactBox.Refresh() })
 }
 
 func (a *appState) selectPeer(index int) {
 	a.mu.Lock()
-	if index < 0 || index >= len(a.peerIDs) {
+	if index < 0 || index >= len(a.peerKeys) {
 		a.mu.Unlock()
 		return
 	}
-	peerID := a.peerIDs[index]
-	p := a.peers[peerID]
-	a.active = peerID
+	key := a.peerKeys[index]
+	p := a.peers[key]
+	a.activeKey = key
 	a.mu.Unlock()
 	if p == nil {
 		return
 	}
 	a.safeUI(func() {
 		a.chatLabel.SetText("正在与 " + p.Name + " 对话")
+		a.chatSubLabel.SetText(fmt.Sprintf("地址: %s:%d | 实例: %s", p.Addr, p.Port, shortID(p.InstanceID)))
 	})
-	a.renderHistory(peerID)
+	a.renderHistory(key)
 }
 
-func (a *appState) renderHistory(peerID string) {
-	history, _ := a.loadHistory(peerID)
+func (a *appState) getActivePeer() (string, peer, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.activeKey == "" {
+		return "", peer{}, false
+	}
+	p := a.peers[a.activeKey]
+	if p == nil {
+		return "", peer{}, false
+	}
+	return a.activeKey, *p, true
+}
+
+func (a *appState) renderHistory(peerKey string) {
+	history, _ := a.loadHistory(peerKey)
 	var b strings.Builder
 	for _, m := range history {
 		name := m.From
@@ -606,24 +912,22 @@ func (a *appState) renderHistory(peerID string) {
 		b.WriteString(m.Text)
 		b.WriteString("\n")
 	}
-	a.safeUI(func() {
-		a.chatView.SetText(b.String())
-	})
+	a.safeUI(func() { a.chatView.SetText(b.String()) })
 }
 
-func (a *appState) refreshChatIfActive(peerID string) {
+func (a *appState) refreshChatIfActive(peerKey string) {
 	a.mu.Lock()
-	active := a.active
+	active := a.activeKey
 	a.mu.Unlock()
-	if active == peerID {
-		a.renderHistory(peerID)
+	if active == peerKey {
+		a.renderHistory(peerKey)
 	}
 }
 
-func (a *appState) appendHistory(peerID string, line historyLine) {
+func (a *appState) appendHistory(peerKey string, line historyLine) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	path := filepath.Join(a.chatsDir, peerID+".json")
+	path := a.historyPath(peerKey)
 	list := []historyLine{}
 	if b, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(b, &list)
@@ -633,8 +937,8 @@ func (a *appState) appendHistory(peerID string, line historyLine) {
 	_ = os.WriteFile(path, b, 0o644)
 }
 
-func (a *appState) loadHistory(peerID string) ([]historyLine, error) {
-	path := filepath.Join(a.chatsDir, peerID+".json")
+func (a *appState) loadHistory(peerKey string) ([]historyLine, error) {
+	path := a.historyPath(peerKey)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -649,10 +953,35 @@ func (a *appState) loadHistory(peerID string) ([]historyLine, error) {
 	return list, nil
 }
 
+func (a *appState) historyPath(peerKey string) string {
+	return filepath.Join(a.chatsDir, sanitizeFilename(peerKey)+".json")
+}
+
+func (a *appState) saveIncomingFile(payload plainPayload) (string, error) {
+	if payload.FileName == "" || payload.FileData == "" {
+		return "", errors.New("文件数据不完整")
+	}
+	raw, err := base64.StdEncoding.DecodeString(payload.FileData)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) > maxFileBytes {
+		return "", errors.New("文件超过 8MB 限制")
+	}
+	name := sanitizeFilename(payload.FileName)
+	if name == "" {
+		name = "received.bin"
+	}
+	target := uniqueFilePath(a.downloadsDir, name)
+	if err := os.WriteFile(target, raw, 0o644); err != nil {
+		return "", err
+	}
+	rel, _ := filepath.Rel(a.baseDir, target)
+	return fmt.Sprintf("[文件] %s 已接收 (%s) -> %s", name, humanSize(int64(len(raw))), rel), nil
+}
+
 func (a *appState) pushStatus(text string) {
-	a.safeUI(func() {
-		a.statusBar.SetText(text)
-	})
+	a.safeUI(func() { a.statusBar.SetText(text) })
 }
 
 func (a *appState) safeUI(fn func()) {
@@ -683,7 +1012,7 @@ func sendEnvelope(p peer, env chatEnvelope) error {
 		return err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 	return json.NewEncoder(conn).Encode(env)
 }
 
@@ -699,8 +1028,8 @@ func generateKeyPair() (pubB64, privB64 string, err error) {
 	return base64.StdEncoding.EncodeToString(pub), base64.StdEncoding.EncodeToString(priv), nil
 }
 
-func encrypt(peerPubB64, selfPrivB64 string, plain plainMessage) (encryptedMessage, error) {
-	plainBytes, err := json.Marshal(plain)
+func encrypt(peerPubB64, selfPrivB64 string, payload plainPayload) (encryptedMessage, error) {
+	plainBytes, err := json.Marshal(payload)
 	if err != nil {
 		return encryptedMessage{}, err
 	}
@@ -732,38 +1061,38 @@ func encrypt(peerPubB64, selfPrivB64 string, plain plainMessage) (encryptedMessa
 	}, nil
 }
 
-func decrypt(senderPubB64, selfPrivB64 string, c encryptedMessage) (plainMessage, error) {
+func decrypt(senderPubB64, selfPrivB64 string, c encryptedMessage) (plainPayload, error) {
 	salt, err := base64.StdEncoding.DecodeString(c.Salt)
 	if err != nil {
-		return plainMessage{}, err
+		return plainPayload{}, err
 	}
 	nonce, err := base64.StdEncoding.DecodeString(c.Nonce)
 	if err != nil {
-		return plainMessage{}, err
+		return plainPayload{}, err
 	}
 	cipherText, err := base64.StdEncoding.DecodeString(c.Data)
 	if err != nil {
-		return plainMessage{}, err
+		return plainPayload{}, err
 	}
 	key, err := deriveKey(selfPrivB64, senderPubB64, salt)
 	if err != nil {
-		return plainMessage{}, err
+		return plainPayload{}, err
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return plainMessage{}, err
+		return plainPayload{}, err
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return plainMessage{}, err
+		return plainPayload{}, err
 	}
 	plainBytes, err := gcm.Open(nil, nonce, cipherText, nil)
 	if err != nil {
-		return plainMessage{}, err
+		return plainPayload{}, err
 	}
-	var p plainMessage
+	var p plainPayload
 	if err := json.Unmarshal(plainBytes, &p); err != nil {
-		return plainMessage{}, err
+		return plainPayload{}, err
 	}
 	return p, nil
 }
@@ -795,4 +1124,153 @@ func randomID(n int) string {
 		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
+}
+
+func makePeerKey(id, instance string) string {
+	if instance == "" {
+		return id
+	}
+	return id + "@" + instance
+}
+
+func sanitizeFilename(s string) string {
+	if s == "" {
+		return ""
+	}
+	s = filepath.Base(s)
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '-', r == '_', r == '@':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := strings.Trim(b.String(), "._")
+	if out == "" {
+		return "file"
+	}
+	return out
+}
+
+func uniqueFilePath(dir, name string) string {
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	ext := filepath.Ext(name)
+	candidate := filepath.Join(dir, name)
+	if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
+		return candidate
+	}
+	for i := 1; i < 1000; i++ {
+		candidate = filepath.Join(dir, fmt.Sprintf("%s_%d%s", base, i, ext))
+		if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate
+		}
+	}
+	return filepath.Join(dir, fmt.Sprintf("%s_%d%s", base, time.Now().Unix(), ext))
+}
+
+func humanSize(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KB", "MB", "GB"}
+	f := float64(n)
+	idx := -1
+	for f >= 1024 && idx < len(units)-1 {
+		f /= 1024
+		idx++
+	}
+	if idx < 0 {
+		return fmt.Sprintf("%d B", n)
+	}
+	return fmt.Sprintf("%.1f %s", f, units[idx])
+}
+
+func shortID(s string) string {
+	if len(s) <= 6 {
+		return s
+	}
+	return s[:6]
+}
+
+func localIPv4Addrs() []net.IP {
+	ifaces, _ := net.Interfaces()
+	out := []net.IP{}
+	for i := range ifaces {
+		iface := ifaces[i]
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP.To4()
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			cp := make(net.IP, 4)
+			copy(cp, ip)
+			out = append(out, cp)
+		}
+	}
+	return out
+}
+
+func localDirectedBroadcasts() []net.IP {
+	ifaces, _ := net.Interfaces()
+	set := map[string]net.IP{}
+	for i := range ifaces {
+		iface := ifaces[i]
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP.To4()
+			mask := ipNet.Mask
+			if ip == nil || len(mask) != 4 {
+				continue
+			}
+			b := make(net.IP, 4)
+			for j := 0; j < 4; j++ {
+				b[j] = ip[j] | ^mask[j]
+			}
+			set[b.String()] = b
+		}
+	}
+	out := make([]net.IP, 0, len(set))
+	for _, ip := range set {
+		out = append(out, ip)
+	}
+	return out
+}
+
+func isPrivateIPv4(ip net.IP) bool {
+	if ip == nil || len(ip) != 4 {
+		return false
+	}
+	if ip[0] == 10 {
+		return true
+	}
+	if ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31 {
+		return true
+	}
+	if ip[0] == 192 && ip[1] == 168 {
+		return true
+	}
+	return false
 }
