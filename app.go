@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"image/color"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -301,20 +302,18 @@ type appState struct {
 	statusBar      *widget.Label
 	headerAvatar   *canvas.Image
 	settingsAvatar *canvas.Image
+	dataLockFile   *os.File
+	dataLockPath   string
 }
 
 func newApp(baseDir string) *appState {
 	return &appState{
-		baseDir:      baseDir,
-		dataDir:      filepath.Join(baseDir, "data"),
-		chatsDir:     filepath.Join(baseDir, "data", "chats"),
-		downloadsDir: filepath.Join(baseDir, "data", "downloads"),
-		profileDir:   filepath.Join(baseDir, "data", "profile"),
-		instanceID:   randomID(4),
-		peers:        map[string]*peer{},
-		knownPeers:   map[string]knownPeer{},
-		unread:       map[string]int{},
-		stopCh:       make(chan struct{}),
+		baseDir:    baseDir,
+		instanceID: randomID(4),
+		peers:      map[string]*peer{},
+		knownPeers: map[string]knownPeer{},
+		unread:     map[string]int{},
+		stopCh:     make(chan struct{}),
 	}
 }
 
@@ -348,6 +347,9 @@ func (a *appState) run() error {
 }
 
 func (a *appState) initStorage() error {
+	if err := a.selectStorageSlot(); err != nil {
+		return err
+	}
 	for _, p := range []string{a.dataDir, a.chatsDir, a.downloadsDir, a.profileDir} {
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			return err
@@ -390,6 +392,36 @@ func (a *appState) initStorage() error {
 	_ = a.migrateHistoryKeys()
 	_ = a.seedKnownPeersFromHistory()
 	return nil
+}
+
+func (a *appState) selectStorageSlot() error {
+	for i := 0; i < 1000; i++ {
+		name := "data"
+		if i > 0 {
+			name = fmt.Sprintf("data(%d)", i)
+		}
+		root := filepath.Join(a.baseDir, name)
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return err
+		}
+		lockPath := filepath.Join(root, ".lantalk.lock")
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			return err
+		}
+		_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+		a.dataLockFile = lockFile
+		a.dataLockPath = lockPath
+		a.dataDir = root
+		a.chatsDir = filepath.Join(root, "chats")
+		a.downloadsDir = filepath.Join(root, "downloads")
+		a.profileDir = filepath.Join(root, "profile")
+		return nil
+	}
+	return errors.New("no available data directory slot")
 }
 
 func (a *appState) saveConfig() error {
@@ -1555,39 +1587,38 @@ func (a *appState) sendPayload(peerKey string, p peer, payload plainPayload, his
 
 func (a *appState) startDiscovery(chatPort int) error {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: discoveryPort})
-	if err != nil {
-		return err
-	}
-	_ = conn.SetReadBuffer(64 * 1024)
-	a.udpConn = conn
+	if err == nil {
+		_ = conn.SetReadBuffer(64 * 1024)
+		a.udpConn = conn
 
-	pc := ipv4.NewPacketConn(conn)
-	ifaces, _ := net.Interfaces()
-	for i := range ifaces {
-		iface := ifaces[i]
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-		_ = pc.JoinGroup(&iface, &net.UDPAddr{IP: net.ParseIP(discoveryHost)})
-	}
-
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, addr, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				return
-			}
-			var p discoveryPacket
-			if err := json.Unmarshal(buf[:n], &p); err != nil {
+		pc := ipv4.NewPacketConn(conn)
+		ifaces, _ := net.Interfaces()
+		for i := range ifaces {
+			iface := ifaces[i]
+			if iface.Flags&net.FlagUp == 0 {
 				continue
 			}
-			if p.Type != "hello" || p.ID == "" || p.PublicKey == "" || p.InstanceID == a.instanceID {
-				continue
-			}
-			a.upsertPeer(peer{Key: makePeerKey(p.ID, p.InstanceID), ID: p.ID, InstanceID: p.InstanceID, Name: p.Name, Addr: addr.IP.String(), Port: p.Port, PublicKey: p.PublicKey, LastSeen: time.Now()})
+			_ = pc.JoinGroup(&iface, &net.UDPAddr{IP: net.ParseIP(discoveryHost)})
 		}
-	}()
+
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, addr, err := conn.ReadFromUDP(buf)
+				if err != nil {
+					return
+				}
+				var p discoveryPacket
+				if err := json.Unmarshal(buf[:n], &p); err != nil {
+					continue
+				}
+				if p.Type != "hello" || p.ID == "" || p.PublicKey == "" || p.InstanceID == a.instanceID {
+					continue
+				}
+				a.upsertPeer(peer{Key: makePeerKey(p.ID, p.InstanceID), ID: p.ID, InstanceID: p.InstanceID, Name: p.Name, Addr: addr.IP.String(), Port: p.Port, PublicKey: p.PublicKey, LastSeen: time.Now()})
+			}
+		}()
+	}
 
 	go func() {
 		ticker := time.NewTicker(announceEvery)
@@ -2157,6 +2188,14 @@ func (a *appState) shutdown() {
 		}
 		if a.tcpListener != nil {
 			_ = a.tcpListener.Close()
+		}
+		if a.dataLockFile != nil {
+			_ = a.dataLockFile.Close()
+			a.dataLockFile = nil
+		}
+		if a.dataLockPath != "" {
+			_ = os.Remove(a.dataLockPath)
+			a.dataLockPath = ""
 		}
 	})
 }
