@@ -74,10 +74,22 @@ type peer struct {
 }
 
 type peerRow struct {
-	Key      string
-	Title    string
-	Subtitle string
-	Unread   int
+	Key        string
+	Name       string
+	Preview    string
+	Online     bool
+	Unread     int
+	LastSentAt int64
+}
+
+type knownPeer struct {
+	Key        string `json:"key"`
+	ID         string `json:"id"`
+	InstanceID string `json:"instanceId,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Addr       string `json:"addr,omitempty"`
+	LastText   string `json:"lastText,omitempty"`
+	LastSentAt int64  `json:"lastSentAt,omitempty"`
 }
 
 type discoveryPacket struct {
@@ -253,6 +265,7 @@ type appState struct {
 	cfg            config
 	mu             sync.Mutex
 	peers          map[string]*peer
+	knownPeers     map[string]knownPeer
 	unread         map[string]int
 	peerRows       []peerRow
 	peerFilter     string
@@ -288,6 +301,7 @@ func newApp(baseDir string) *appState {
 		profileDir:   filepath.Join(baseDir, "data", "profile"),
 		instanceID:   randomID(4),
 		peers:        map[string]*peer{},
+		knownPeers:   map[string]knownPeer{},
 		unread:       map[string]int{},
 		stopCh:       make(chan struct{}),
 	}
@@ -356,7 +370,12 @@ func (a *appState) initStorage() error {
 		a.cfg.PublicKey = pub
 		a.cfg.PrivateKey = priv
 	}
-	return a.saveConfig()
+	if err := a.saveConfig(); err != nil {
+		return err
+	}
+	_ = a.loadKnownPeers()
+	_ = a.seedKnownPeersFromHistory()
+	return nil
 }
 
 func (a *appState) saveConfig() error {
@@ -365,6 +384,130 @@ func (a *appState) saveConfig() error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(a.dataDir, "config.json"), b, 0o644)
+}
+
+func (a *appState) knownPeersPath() string {
+	return filepath.Join(a.dataDir, "known_peers.json")
+}
+
+func (a *appState) loadKnownPeers() error {
+	b, err := os.ReadFile(a.knownPeersPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	data := map[string]knownPeer{}
+	if err := json.Unmarshal(b, &data); err != nil {
+		return err
+	}
+	if data == nil {
+		data = map[string]knownPeer{}
+	}
+	a.mu.Lock()
+	a.knownPeers = data
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *appState) saveKnownPeers() error {
+	a.mu.Lock()
+	data := make(map[string]knownPeer, len(a.knownPeers))
+	for k, v := range a.knownPeers {
+		data[k] = v
+	}
+	a.mu.Unlock()
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(a.knownPeersPath(), b, 0o644)
+}
+
+func (a *appState) seedKnownPeersFromHistory() error {
+	entries, err := os.ReadDir(a.chatsDir)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
+			continue
+		}
+		key := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		if key == "" {
+			continue
+		}
+		lastText := ""
+		lastSentAt := int64(0)
+		history, err := a.loadHistory(key)
+		if err == nil && len(history) > 0 {
+			last := history[len(history)-1]
+			lastText = last.Text
+			lastSentAt = last.SentAt
+		}
+		a.mu.Lock()
+		if a.upsertKnownPeerLocked(key, knownPeer{LastText: lastText, LastSentAt: lastSentAt}) {
+			changed = true
+		}
+		a.mu.Unlock()
+	}
+	if changed {
+		return a.saveKnownPeers()
+	}
+	return nil
+}
+
+func (a *appState) upsertKnownPeerLocked(key string, in knownPeer) bool {
+	if a.knownPeers == nil {
+		a.knownPeers = map[string]knownPeer{}
+	}
+	cur := a.knownPeers[key]
+	if cur.Key == "" {
+		cur.Key = key
+	}
+	if cur.ID == "" || cur.InstanceID == "" {
+		id, instance := splitPeerKey(key)
+		if cur.ID == "" {
+			cur.ID = id
+		}
+		if cur.InstanceID == "" {
+			cur.InstanceID = instance
+		}
+	}
+	changed := false
+	if strings.TrimSpace(in.ID) != "" && cur.ID != strings.TrimSpace(in.ID) {
+		cur.ID = strings.TrimSpace(in.ID)
+		changed = true
+	}
+	if strings.TrimSpace(in.InstanceID) != "" && cur.InstanceID != strings.TrimSpace(in.InstanceID) {
+		cur.InstanceID = strings.TrimSpace(in.InstanceID)
+		changed = true
+	}
+	if strings.TrimSpace(in.Name) != "" && cur.Name != strings.TrimSpace(in.Name) {
+		cur.Name = strings.TrimSpace(in.Name)
+		changed = true
+	}
+	if strings.TrimSpace(in.Addr) != "" && cur.Addr != strings.TrimSpace(in.Addr) {
+		cur.Addr = strings.TrimSpace(in.Addr)
+		changed = true
+	}
+	if in.LastSentAt > 0 && in.LastSentAt >= cur.LastSentAt {
+		text := strings.TrimSpace(in.LastText)
+		if cur.LastSentAt != in.LastSentAt || (text != "" && cur.LastText != text) {
+			cur.LastSentAt = in.LastSentAt
+			if text != "" {
+				cur.LastText = text
+			}
+			changed = true
+		}
+	}
+	if _, ok := a.knownPeers[key]; !ok {
+		changed = true
+	}
+	a.knownPeers[key] = cur
+	return changed
 }
 
 func (a *appState) buildUI() error {
@@ -400,12 +543,21 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 			return len(a.peerRows)
 		},
 		func() fyne.CanvasObject {
-			icon := widget.NewIcon(theme.AccountIcon())
-			title := widget.NewLabel("")
-			title.TextStyle = fyne.TextStyle{Bold: true}
-			sub := widget.NewLabel("")
-			sub.Wrapping = fyne.TextWrapOff
-			return container.NewHBox(icon, container.NewVBox(title, sub))
+			avatar := avatarImage("", 36)
+			avatarWrap := container.NewPadded(avatar)
+
+			name := widget.NewLabel("")
+			name.TextStyle = fyne.TextStyle{Bold: true}
+			dotBase := canvas.NewRectangle(color.Transparent)
+			dotBase.SetMinSize(fyne.NewSize(10, 10))
+			statusDot := canvas.NewCircle(color.NRGBA{R: 153, G: 160, B: 170, A: 255})
+			statusWrap := container.NewMax(dotBase, statusDot)
+			top := container.NewHBox(name, spacerBox(6), statusWrap, layout.NewSpacer())
+
+			preview := widget.NewLabel("")
+			preview.Wrapping = fyne.TextWrapOff
+			textCol := container.NewVBox(top, preview)
+			return container.NewHBox(avatarWrap, textCol)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			a.mu.Lock()
@@ -415,15 +567,20 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 			}
 			a.mu.Unlock()
 			c := obj.(*fyne.Container)
-			icon := c.Objects[0].(*widget.Icon)
 			textCol := c.Objects[1].(*fyne.Container)
-			if row.Unread > 0 {
-				icon.SetResource(theme.MailComposeIcon())
-			} else {
-				icon.SetResource(theme.AccountIcon())
+			top := textCol.Objects[0].(*fyne.Container)
+			nameLabel := top.Objects[0].(*widget.Label)
+			statusWrap := top.Objects[2].(*fyne.Container)
+			statusDot := statusWrap.Objects[1].(*canvas.Circle)
+			previewLabel := textCol.Objects[1].(*widget.Label)
+
+			statusDot.FillColor = color.NRGBA{R: 153, G: 160, B: 170, A: 255}
+			if row.Online {
+				statusDot.FillColor = color.NRGBA{R: 48, G: 191, B: 88, A: 255}
 			}
-			textCol.Objects[0].(*widget.Label).SetText(row.Title)
-			textCol.Objects[1].(*widget.Label).SetText(row.Subtitle)
+			statusDot.Refresh()
+			nameLabel.SetText(row.Name)
+			previewLabel.SetText(row.Preview)
 		},
 	)
 	a.contactBox.OnSelected = func(id widget.ListItemID) { a.selectPeer(int(id)) }
@@ -618,32 +775,56 @@ func (a *appState) refreshAvatarViews() {
 }
 
 func (a *appState) openPeerProfileDialog() {
-	key, p, ok := a.getActivePeer()
-	if !ok {
+	a.mu.Lock()
+	key := a.activeKey
+	p := a.peers[key]
+	kp := a.knownPeers[key]
+	a.mu.Unlock()
+	if key == "" {
 		return
+	}
+	id := strings.TrimSpace(kp.ID)
+	name := strings.TrimSpace(kp.Name)
+	addr := strings.TrimSpace(kp.Addr)
+	if p != nil {
+		if strings.TrimSpace(p.ID) != "" {
+			id = strings.TrimSpace(p.ID)
+		}
+		if strings.TrimSpace(p.Name) != "" {
+			name = strings.TrimSpace(p.Name)
+		}
+		if strings.TrimSpace(p.Addr) != "" {
+			addr = strings.TrimSpace(p.Addr)
+		}
+	}
+	if id == "" {
+		id, _ = splitPeerKey(key)
+	}
+	if name == "" {
+		name = id
 	}
 
 	nameText := widget.NewEntry()
-	nameText.SetText(strings.TrimSpace(p.Name))
+	nameText.SetText(name)
 	nameText.Disable()
 
 	ipText := widget.NewEntry()
-	ipText.SetText(strings.TrimSpace(p.Addr))
+	ipText.SetText(addr)
 	ipText.Disable()
 
 	idText := widget.NewEntry()
-	idText.SetText(strings.TrimSpace(p.ID))
+	idText.SetText(id)
 	idText.Disable()
 
 	remarkInput := widget.NewEntry()
-	remarkInput.SetText(a.getRemark(p.ID))
+	remarkInput.SetText(a.getRemark(id))
 
 	copyIPBtn := widget.NewButton("复制IP", func() {
-		a.win.Clipboard().SetContent(strings.TrimSpace(p.Addr))
+		a.win.Clipboard().SetContent(addr)
 		a.pushStatus("已复制")
 	})
 	copyIDBtn := widget.NewButton("复制识别码", func() {
-		a.win.Clipboard().SetContent(strings.TrimSpace(p.ID))
+		a.win.Clipboard().SetContent(id)
 		a.pushStatus("已复制")
 	})
 
@@ -658,7 +839,7 @@ func (a *appState) openPeerProfileDialog() {
 	))
 	dlg := dialog.NewCustomConfirm("好友资料", "保存", "关闭", content, func(confirm bool) {
 		if confirm {
-			a.setRemark(p.ID, remarkInput.Text)
+			a.setRemark(id, remarkInput.Text)
 			a.refreshContacts()
 			a.refreshHeaderByKey(key)
 		}
@@ -757,18 +938,42 @@ func (a *appState) displayNameForPeer(p *peer) string {
 	return p.ID
 }
 
-func (a *appState) refreshHeaderByKey(key string) {
+func (a *appState) peerDisplayByKey(key string) (string, bool) {
 	a.mu.Lock()
 	p := a.peers[key]
+	kp := a.knownPeers[key]
 	a.mu.Unlock()
-	if p == nil {
-		a.showBlankPanel()
+	if p != nil {
+		return a.displayNameForPeer(p), true
+	}
+	id := strings.TrimSpace(kp.ID)
+	if id == "" {
+		id, _ = splitPeerKey(key)
+	}
+	if id == "" {
+		return "", false
+	}
+	if remark := a.getRemark(id); remark != "" {
+		return remark, false
+	}
+	if strings.TrimSpace(kp.Name) != "" {
+		return strings.TrimSpace(kp.Name), false
+	}
+	return id, false
+}
+
+func (a *appState) refreshHeaderByKey(key string) {
+	name, online := a.peerDisplayByKey(key)
+	if name == "" {
 		return
 	}
-	a.showChatPanel()
+	status := "离线"
+	if online {
+		status = "在线"
+	}
 	a.safeUI(func() {
-		a.chatHeader.SetText(a.displayNameForPeer(p))
-		a.chatSubHeader.SetText("局域网在线")
+		a.chatHeader.SetText(name)
+		a.chatSubHeader.SetText(status)
 	})
 }
 
@@ -1178,24 +1383,22 @@ func (a *appState) startDiscovery(chatPort int) error {
 			select {
 			case <-ticker.C:
 				changed := false
-				activeLost := false
 				now := time.Now()
 				a.mu.Lock()
 				for key, p := range a.peers {
 					if now.Sub(p.LastSeen) > presenceTTL {
 						delete(a.peers, key)
 						changed = true
-						if a.activeKey == key {
-							a.activeKey = ""
-							activeLost = true
-						}
 					}
 				}
 				a.mu.Unlock()
 				if changed {
 					a.refreshContacts()
-					if activeLost {
-						a.showBlankPanel()
+					a.mu.Lock()
+					active := a.activeKey
+					a.mu.Unlock()
+					if active != "" {
+						a.refreshHeaderByKey(active)
 					}
 				}
 			case <-a.stopCh:
@@ -1363,15 +1566,30 @@ func (a *appState) upsertPeer(in peer) {
 		}
 		exist.LastSeen = in.LastSeen
 	}
+	changed := a.upsertKnownPeerLocked(in.Key, knownPeer{
+		ID:         in.ID,
+		InstanceID: in.InstanceID,
+		Name:       in.Name,
+		Addr:       in.Addr,
+	})
 	a.mu.Unlock()
+	if changed {
+		_ = a.saveKnownPeers()
+	}
 	a.refreshContacts()
 }
 
 func (a *appState) refreshContacts() {
 	a.mu.Lock()
-	pairs := make([]*peer, 0, len(a.peers))
-	for _, p := range a.peers {
-		pairs = append(pairs, p)
+	peers := make(map[string]peer, len(a.peers))
+	for k, p := range a.peers {
+		if p != nil {
+			peers[k] = *p
+		}
+	}
+	known := make(map[string]knownPeer, len(a.knownPeers))
+	for k, v := range a.knownPeers {
+		known[k] = v
 	}
 	unread := make(map[string]int, len(a.unread))
 	for k, v := range a.unread {
@@ -1380,30 +1598,72 @@ func (a *appState) refreshContacts() {
 	filter := strings.ToLower(strings.TrimSpace(a.peerFilter))
 	a.mu.Unlock()
 
-	sort.Slice(pairs, func(i, j int) bool {
-		di := strings.ToLower(a.displayNameForPeer(pairs[i]))
-		dj := strings.ToLower(a.displayNameForPeer(pairs[j]))
-		if di == dj {
-			return pairs[i].Addr < pairs[j].Addr
-		}
-		return di < dj
-	})
+	keys := map[string]struct{}{}
+	for k := range peers {
+		keys[k] = struct{}{}
+	}
+	for k := range known {
+		keys[k] = struct{}{}
+	}
 
-	rows := make([]peerRow, 0, len(pairs))
-	for _, p := range pairs {
-		title := a.displayNameForPeer(p)
-		sub := "局域网在线"
-		unreadCount := unread[p.Key]
-		if unreadCount > 0 {
-			title = fmt.Sprintf("%s (%d)", title, unreadCount)
-			sub = "有新消息 · " + sub
+	now := time.Now()
+	rows := make([]peerRow, 0, len(keys))
+	for key := range keys {
+		p, online := peers[key]
+		kp := known[key]
+		if online && now.Sub(p.LastSeen) > presenceTTL {
+			online = false
 		}
-		probe := strings.ToLower(title + " " + sub)
+		id := strings.TrimSpace(kp.ID)
+		if online && strings.TrimSpace(p.ID) != "" {
+			id = strings.TrimSpace(p.ID)
+		}
+		if id == "" {
+			id, _ = splitPeerKey(key)
+		}
+		name := ""
+		if online {
+			name = a.displayNameForPeer(&p)
+		} else {
+			remark := a.getRemark(id)
+			if remark != "" {
+				name = remark
+			} else if strings.TrimSpace(kp.Name) != "" {
+				name = strings.TrimSpace(kp.Name)
+			} else {
+				name = id
+			}
+		}
+		preview := compactLine(strings.TrimSpace(kp.LastText), 48)
+		if preview == "" {
+			preview = "暂无聊天记录"
+		}
+		unreadCount := unread[key]
+		if unreadCount > 0 {
+			preview = fmt.Sprintf("(%d) %s", unreadCount, preview)
+		}
+		probe := strings.ToLower(name + " " + preview + " " + id)
 		if filter != "" && !strings.Contains(probe, filter) {
 			continue
 		}
-		rows = append(rows, peerRow{Key: p.Key, Title: title, Subtitle: sub, Unread: unreadCount})
+		rows = append(rows, peerRow{
+			Key:        key,
+			Name:       name,
+			Preview:    preview,
+			Online:     online,
+			Unread:     unreadCount,
+			LastSentAt: kp.LastSentAt,
+		})
 	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Online != rows[j].Online {
+			return rows[i].Online
+		}
+		if rows[i].LastSentAt != rows[j].LastSentAt {
+			return rows[i].LastSentAt > rows[j].LastSentAt
+		}
+		return strings.ToLower(rows[i].Name) < strings.ToLower(rows[j].Name)
+	})
 
 	a.mu.Lock()
 	a.peerRows = rows
@@ -1417,16 +1677,18 @@ func (a *appState) selectPeer(index int) {
 		a.mu.Unlock()
 		return
 	}
-	key := a.peerRows[index].Key
-	p := a.peers[key]
+	row := a.peerRows[index]
+	key := row.Key
 	a.activeKey = key
 	a.mu.Unlock()
-	if p == nil {
-		return
+	a.showChatPanel()
+	status := "离线"
+	if row.Online {
+		status = "在线"
 	}
 	a.safeUI(func() {
-		a.chatHeader.SetText(a.displayNameForPeer(p))
-		a.chatSubHeader.SetText("局域网在线")
+		a.chatHeader.SetText(row.Name)
+		a.chatSubHeader.SetText(status)
 	})
 	a.clearUnread(key)
 	a.renderHistory(key)
@@ -1550,7 +1812,6 @@ func (a *appState) refreshChatIfActive(peerKey string) {
 
 func (a *appState) appendHistory(peerKey string, line historyLine) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	path := a.historyPath(peerKey)
 	list := []historyLine{}
 	if b, err := os.ReadFile(path); err == nil {
@@ -1559,6 +1820,14 @@ func (a *appState) appendHistory(peerKey string, line historyLine) {
 	list = append(list, line)
 	b, _ := json.MarshalIndent(list, "", "  ")
 	_ = os.WriteFile(path, b, 0o644)
+	changed := a.upsertKnownPeerLocked(peerKey, knownPeer{
+		LastText:   line.Text,
+		LastSentAt: line.SentAt,
+	})
+	a.mu.Unlock()
+	if changed {
+		_ = a.saveKnownPeers()
+	}
 }
 
 func (a *appState) loadHistory(peerKey string) ([]historyLine, error) {
@@ -1903,6 +2172,33 @@ func shortID(s string) string {
 		return s
 	}
 	return s[:6]
+}
+
+func splitPeerKey(key string) (string, string) {
+	parts := strings.SplitN(key, "@", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return "", ""
+}
+
+func compactLine(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	if len(s) <= limit {
+		return s
+	}
+	if limit <= 3 {
+		return s[:limit]
+	}
+	return s[:limit-3] + "..."
 }
 
 func localIPv4Addrs() []net.IP {
