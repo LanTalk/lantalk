@@ -242,7 +242,7 @@ func (r *emojiTileRenderer) Destroy() {}
 func (appTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 107, G: 117, B: 126, A: 255}
+		return color.NRGBA{R: 53, G: 146, B: 255, A: 255}
 	case theme.ColorNameBackground:
 		return color.NRGBA{R: 244, G: 246, B: 248, A: 255}
 	case theme.ColorNameInputBackground:
@@ -357,6 +357,7 @@ func (a *appState) initStorage() error {
 		}
 	}
 
+	a.cfg.ID = canonicalPeerID(a.cfg.ID)
 	if strings.TrimSpace(a.cfg.ID) == "" {
 		a.cfg.ID = newUserCode()
 	}
@@ -370,6 +371,7 @@ func (a *appState) initStorage() error {
 	if a.cfg.Remarks == nil {
 		a.cfg.Remarks = map[string]string{}
 	}
+	a.normalizeRemarkKeys()
 	if a.cfg.PublicKey == "" || a.cfg.PrivateKey == "" {
 		pub, priv, err := generateKeyPair()
 		if err != nil {
@@ -382,6 +384,7 @@ func (a *appState) initStorage() error {
 		return err
 	}
 	_ = a.loadKnownPeers()
+	_ = a.migrateHistoryKeys()
 	_ = a.seedKnownPeersFromHistory()
 	return nil
 }
@@ -392,6 +395,21 @@ func (a *appState) saveConfig() error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(a.dataDir, "config.json"), b, 0o644)
+}
+
+func (a *appState) normalizeRemarkKeys() {
+	if len(a.cfg.Remarks) == 0 {
+		return
+	}
+	norm := make(map[string]string, len(a.cfg.Remarks))
+	for k, v := range a.cfg.Remarks {
+		key := canonicalPeerID(k)
+		if key == "" {
+			continue
+		}
+		norm[key] = strings.TrimSpace(v)
+	}
+	a.cfg.Remarks = norm
 }
 
 func (a *appState) knownPeersPath() string {
@@ -413,10 +431,63 @@ func (a *appState) loadKnownPeers() error {
 	if data == nil {
 		data = map[string]knownPeer{}
 	}
+	normalized := map[string]knownPeer{}
+	changed := false
+	for rawKey, item := range data {
+		id := canonicalPeerID(item.ID)
+		if id == "" {
+			id, _ = splitPeerKey(rawKey)
+			id = canonicalPeerID(id)
+		}
+		if id == "" {
+			continue
+		}
+		item.Key = id
+		item.ID = id
+		exist := normalized[id]
+		normalized[id] = mergeKnownPeer(exist, item)
+		if rawKey != id || item.ID != strings.TrimSpace(data[rawKey].ID) {
+			changed = true
+		}
+	}
+	if len(normalized) != len(data) {
+		changed = true
+	}
 	a.mu.Lock()
-	a.knownPeers = data
+	a.knownPeers = normalized
 	a.mu.Unlock()
+	if changed {
+		_ = a.saveKnownPeers()
+	}
 	return nil
+}
+
+func mergeKnownPeer(base, in knownPeer) knownPeer {
+	out := base
+	if out.Key == "" {
+		out.Key = in.Key
+	}
+	if out.ID == "" {
+		out.ID = in.ID
+	}
+	if out.InstanceID == "" && in.InstanceID != "" {
+		out.InstanceID = strings.TrimSpace(in.InstanceID)
+	}
+	if in.Name != "" {
+		out.Name = strings.TrimSpace(in.Name)
+	}
+	if in.Addr != "" {
+		out.Addr = strings.TrimSpace(in.Addr)
+	}
+	if in.LastSentAt > out.LastSentAt {
+		out.LastSentAt = in.LastSentAt
+		if strings.TrimSpace(in.LastText) != "" {
+			out.LastText = strings.TrimSpace(in.LastText)
+		}
+	} else if strings.TrimSpace(out.LastText) == "" && strings.TrimSpace(in.LastText) != "" {
+		out.LastText = strings.TrimSpace(in.LastText)
+	}
+	return out
 }
 
 func (a *appState) saveKnownPeers() error {
@@ -443,7 +514,12 @@ func (a *appState) seedKnownPeersFromHistory() error {
 		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
 			continue
 		}
-		key := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		raw := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		id, _ := splitPeerKey(raw)
+		key := canonicalPeerID(id)
+		if key == "" {
+			key = canonicalPeerID(raw)
+		}
 		if key == "" {
 			continue
 		}
@@ -467,7 +543,86 @@ func (a *appState) seedKnownPeersFromHistory() error {
 	return nil
 }
 
+func (a *appState) migrateHistoryKeys() error {
+	entries, err := os.ReadDir(a.chatsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	grouped := map[string][]string{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
+			continue
+		}
+		rawKey := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		id, _ := splitPeerKey(rawKey)
+		key := canonicalPeerID(id)
+		if key == "" {
+			key = canonicalPeerID(rawKey)
+		}
+		if key == "" {
+			continue
+		}
+		grouped[key] = append(grouped[key], filepath.Join(a.chatsDir, e.Name()))
+	}
+
+	for key, files := range grouped {
+		seen := map[string]struct{}{}
+		merged := []historyLine{}
+		for _, p := range files {
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			list := []historyLine{}
+			if err := json.Unmarshal(b, &list); err != nil {
+				continue
+			}
+			merged = append(merged, list...)
+		}
+		if len(merged) == 0 {
+			continue
+		}
+		sort.SliceStable(merged, func(i, j int) bool {
+			if merged[i].SentAt == merged[j].SentAt {
+				return merged[i].Direction+merged[i].From+merged[i].Text < merged[j].Direction+merged[j].From+merged[j].Text
+			}
+			return merged[i].SentAt < merged[j].SentAt
+		})
+		dedup := make([]historyLine, 0, len(merged))
+		seenLine := map[string]struct{}{}
+		for _, line := range merged {
+			k := fmt.Sprintf("%s|%s|%s|%d", line.Direction, line.From, line.Text, line.SentAt)
+			if _, ok := seenLine[k]; ok {
+				continue
+			}
+			seenLine[k] = struct{}{}
+			dedup = append(dedup, line)
+		}
+		outPath := a.historyPath(key)
+		if b, err := json.MarshalIndent(dedup, "", "  "); err == nil {
+			_ = os.WriteFile(outPath, b, 0o644)
+		}
+		for _, p := range files {
+			if filepath.Clean(p) == filepath.Clean(outPath) {
+				continue
+			}
+			_ = os.Remove(p)
+		}
+	}
+	return nil
+}
+
 func (a *appState) upsertKnownPeerLocked(key string, in knownPeer) bool {
+	key = makePeerKey(key, "")
+	in.ID = canonicalPeerID(in.ID)
 	if a.knownPeers == nil {
 		a.knownPeers = map[string]knownPeer{}
 	}
@@ -475,6 +630,7 @@ func (a *appState) upsertKnownPeerLocked(key string, in knownPeer) bool {
 	if cur.Key == "" {
 		cur.Key = key
 	}
+	cur.ID = canonicalPeerID(cur.ID)
 	if cur.ID == "" || cur.InstanceID == "" {
 		id, instance := splitPeerKey(key)
 		if cur.ID == "" {
@@ -485,8 +641,8 @@ func (a *appState) upsertKnownPeerLocked(key string, in knownPeer) bool {
 		}
 	}
 	changed := false
-	if strings.TrimSpace(in.ID) != "" && cur.ID != strings.TrimSpace(in.ID) {
-		cur.ID = strings.TrimSpace(in.ID)
+	if canonicalPeerID(in.ID) != "" && cur.ID != canonicalPeerID(in.ID) {
+		cur.ID = canonicalPeerID(in.ID)
 		changed = true
 	}
 	if strings.TrimSpace(in.InstanceID) != "" && cur.InstanceID != strings.TrimSpace(in.InstanceID) {
@@ -677,6 +833,14 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 }
 
 func (a *appState) openSettingsWindow() {
+	if a.uiApp == nil {
+		return
+	}
+	w := a.uiApp.NewWindow("个人设置")
+	w.SetIcon(resourceAppIcon)
+	w.Resize(fyne.NewSize(520, 420))
+	w.CenterOnScreen()
+
 	avatarPreview := avatarImage(a.avatarAbsPath(), 132)
 	a.settingsAvatar = avatarPreview
 
@@ -696,8 +860,8 @@ func (a *appState) openSettingsWindow() {
 			if path == "" {
 				return
 			}
-			a.applyAvatar(path, a.win)
-		}, a.win)
+			a.applyAvatar(path, w)
+		}, w)
 	})
 	clearAvatarBtn := widget.NewButton("移除头像", func() {
 		a.cfg.Avatar = ""
@@ -706,7 +870,7 @@ func (a *appState) openSettingsWindow() {
 	})
 
 	copyIDBtn := widget.NewButton("复制识别码", func() {
-		a.win.Clipboard().SetContent(strings.TrimSpace(a.cfg.ID))
+		w.Clipboard().SetContent(strings.TrimSpace(a.cfg.ID))
 		a.pushStatus("已复制")
 	})
 
@@ -718,37 +882,43 @@ func (a *appState) openSettingsWindow() {
 		widget.NewFormItem("昵称", nameInput),
 		widget.NewFormItem("识别码", idInput),
 	)
-	content := container.NewPadded(widget.NewCard("", "", container.NewVBox(avatarRow, infoForm, copyIDBtn)))
-	dlg := dialog.NewCustomConfirm("个人设置", "保存", "关闭", content, func(save bool) {
-		if save {
-			name := strings.TrimSpace(nameInput.Text)
-			if name == "" {
-				name = "LanUser"
-			}
-			a.cfg.Name = name
-			if err := a.saveConfig(); err != nil {
-				dialog.ShowError(err, a.win)
-				return
-			}
-			if a.listenPort > 0 {
-				a.broadcastHello(a.listenPort)
-			}
-			a.refreshContacts()
-			a.refreshAvatarViews()
-			a.mu.Lock()
-			active := a.activeKey
-			a.mu.Unlock()
-			if active != "" {
-				a.refreshHeaderByKey(active)
-			}
-			a.pushStatus("已保存")
+	saveBtn := widget.NewButton("保存", func() {
+		name := strings.TrimSpace(nameInput.Text)
+		if name == "" {
+			name = "LanUser"
 		}
-	}, a.win)
-	dlg.SetOnClosed(func() {
+		a.cfg.Name = name
+		if err := a.saveConfig(); err != nil {
+			dialog.ShowError(err, w)
+			return
+		}
+		if a.listenPort > 0 {
+			a.broadcastHello(a.listenPort)
+		}
+		a.refreshContacts()
+		a.refreshAvatarViews()
+		a.mu.Lock()
+		active := a.activeKey
+		a.mu.Unlock()
+		if active != "" {
+			a.refreshHeaderByKey(active)
+		}
+		a.pushStatus("已保存")
+		w.Close()
+	})
+	closeBtn := widget.NewButton("关闭", func() { w.Close() })
+	content := container.NewBorder(
+		nil,
+		container.NewPadded(container.NewHBox(layout.NewSpacer(), saveBtn, closeBtn)),
+		nil,
+		nil,
+		container.NewPadded(container.NewVBox(avatarRow, infoForm, copyIDBtn)),
+	)
+	w.SetContent(content)
+	w.SetOnClosed(func() {
 		a.settingsAvatar = nil
 	})
-	dlg.Resize(fyne.NewSize(520, 420))
-	dlg.Show()
+	w.Show()
 }
 
 func (a *appState) applyAvatar(srcPath string, owner fyne.Window) {
@@ -802,6 +972,9 @@ func (a *appState) refreshAvatarViews() {
 }
 
 func (a *appState) openPeerProfileDialog() {
+	if a.uiApp == nil {
+		return
+	}
 	a.mu.Lock()
 	key := a.activeKey
 	p := a.peers[key]
@@ -810,6 +983,11 @@ func (a *appState) openPeerProfileDialog() {
 	if key == "" {
 		return
 	}
+	w := a.uiApp.NewWindow("好友资料")
+	w.SetIcon(resourceAppIcon)
+	w.Resize(fyne.NewSize(520, 320))
+	w.CenterOnScreen()
+
 	id := strings.TrimSpace(kp.ID)
 	name := strings.TrimSpace(kp.Name)
 	addr := strings.TrimSpace(kp.Addr)
@@ -827,6 +1005,7 @@ func (a *appState) openPeerProfileDialog() {
 	if id == "" {
 		id, _ = splitPeerKey(key)
 	}
+	id = canonicalPeerID(id)
 	if name == "" {
 		name = id
 	}
@@ -847,32 +1026,38 @@ func (a *appState) openPeerProfileDialog() {
 	remarkInput.SetText(a.getRemark(id))
 
 	copyIPBtn := widget.NewButton("复制IP", func() {
-		a.win.Clipboard().SetContent(addr)
+		w.Clipboard().SetContent(addr)
 		a.pushStatus("已复制")
 	})
 	copyIDBtn := widget.NewButton("复制识别码", func() {
-		a.win.Clipboard().SetContent(id)
+		w.Clipboard().SetContent(id)
 		a.pushStatus("已复制")
 	})
 
-	content := container.NewPadded(container.NewVBox(
-		widget.NewForm(
-			widget.NewFormItem("昵称", nameText),
-			widget.NewFormItem("IP", ipText),
-			widget.NewFormItem("识别码", idText),
-			widget.NewFormItem("好友备注", remarkInput),
-		),
-		container.NewHBox(copyIPBtn, copyIDBtn),
-	))
-	dlg := dialog.NewCustomConfirm("好友资料", "保存", "关闭", content, func(confirm bool) {
-		if confirm {
-			a.setRemark(id, remarkInput.Text)
-			a.refreshContacts()
-			a.refreshHeaderByKey(key)
-		}
-	}, a.win)
-	dlg.Resize(fyne.NewSize(520, 320))
-	dlg.Show()
+	saveBtn := widget.NewButton("保存", func() {
+		a.setRemark(id, remarkInput.Text)
+		a.refreshContacts()
+		a.refreshHeaderByKey(key)
+		w.Close()
+	})
+	closeBtn := widget.NewButton("关闭", func() { w.Close() })
+	content := container.NewBorder(
+		nil,
+		container.NewPadded(container.NewHBox(layout.NewSpacer(), saveBtn, closeBtn)),
+		nil,
+		nil,
+		container.NewPadded(container.NewVBox(
+			widget.NewForm(
+				widget.NewFormItem("昵称", nameText),
+				widget.NewFormItem("IP", ipText),
+				widget.NewFormItem("识别码", idText),
+				widget.NewFormItem("好友备注", remarkInput),
+			),
+			container.NewHBox(copyIPBtn, copyIDBtn),
+		)),
+	)
+	w.SetContent(content)
+	w.Show()
 }
 
 func (a *appState) openEmojiPicker() {
@@ -905,12 +1090,20 @@ func (a *appState) insertToInput(s string) {
 }
 
 func (a *appState) getRemark(userID string) string {
+	userID = canonicalPeerID(userID)
+	if userID == "" {
+		return ""
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return strings.TrimSpace(a.cfg.Remarks[userID])
 }
 
 func (a *appState) setRemark(userID, remark string) {
+	userID = canonicalPeerID(userID)
+	if userID == "" {
+		return
+	}
 	a.mu.Lock()
 	if a.cfg.Remarks == nil {
 		a.cfg.Remarks = map[string]string{}
@@ -955,7 +1148,7 @@ func (a *appState) displayNameForPeer(p *peer) string {
 	if p == nil {
 		return ""
 	}
-	remark := a.getRemark(p.ID)
+	remark := a.getRemark(canonicalPeerID(p.ID))
 	if remark != "" {
 		return remark
 	}
@@ -1565,8 +1758,11 @@ func (a *appState) probeTarget(target string) error {
 }
 
 func (a *appState) upsertPeer(in peer) {
+	in.ID = canonicalPeerID(in.ID)
 	if in.Key == "" {
 		in.Key = makePeerKey(in.ID, in.InstanceID)
+	} else {
+		in.Key = makePeerKey(in.Key, in.InstanceID)
 	}
 	if in.Key == makePeerKey(a.cfg.ID, a.instanceID) || in.PublicKey == "" {
 		return
@@ -1785,7 +1981,7 @@ func (a *appState) renderBubbleMessage(m historyLine) fyne.CanvasObject {
 
 	bgColor := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	if outgoing {
-		bgColor = color.NRGBA{R: 248, G: 249, B: 251, A: 255}
+		bgColor = color.NRGBA{R: 226, G: 238, B: 255, A: 255}
 	}
 	bg := canvas.NewRectangle(bgColor)
 	bg.CornerRadius = 10
@@ -1897,6 +2093,7 @@ func (a *appState) refreshChatIfActive(peerKey string) {
 }
 
 func (a *appState) appendHistory(peerKey string, line historyLine) {
+	peerKey = makePeerKey(peerKey, "")
 	a.mu.Lock()
 	path := a.historyPath(peerKey)
 	list := []historyLine{}
@@ -1917,6 +2114,7 @@ func (a *appState) appendHistory(peerKey string, line historyLine) {
 }
 
 func (a *appState) loadHistory(peerKey string) ([]historyLine, error) {
+	peerKey = makePeerKey(peerKey, "")
 	path := a.historyPath(peerKey)
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -1933,6 +2131,7 @@ func (a *appState) loadHistory(peerKey string) ([]historyLine, error) {
 }
 
 func (a *appState) historyPath(peerKey string) string {
+	peerKey = makePeerKey(peerKey, "")
 	return filepath.Join(a.chatsDir, sanitizeFilename(peerKey)+".json")
 }
 
@@ -2160,10 +2359,16 @@ func randomID(n int) string {
 }
 
 func makePeerKey(id, instance string) string {
-	if instance == "" {
-		return id
+	_ = instance
+	cleanID, _ := splitPeerKey(id)
+	if cleanID == "" {
+		cleanID = canonicalPeerID(id)
 	}
-	return id + "@" + instance
+	return cleanID
+}
+
+func canonicalPeerID(id string) string {
+	return strings.ToUpper(strings.TrimSpace(id))
 }
 
 func chunkNonce(idx uint64) []byte {
@@ -2263,10 +2468,10 @@ func shortID(s string) string {
 func splitPeerKey(key string) (string, string) {
 	parts := strings.SplitN(key, "@", 2)
 	if len(parts) == 2 {
-		return parts[0], parts[1]
+		return canonicalPeerID(parts[0]), strings.TrimSpace(parts[1])
 	}
 	if len(parts) == 1 {
-		return parts[0], ""
+		return canonicalPeerID(parts[0]), ""
 	}
 	return "", ""
 }
