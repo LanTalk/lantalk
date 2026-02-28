@@ -17,7 +17,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -35,6 +34,7 @@ import (
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"github.com/rivo/uniseg"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/net/ipv4"
@@ -485,9 +485,8 @@ func (t *emojiTile) TappedSecondary(*fyne.PointEvent) {}
 func (t *emojiTile) CreateRenderer() fyne.WidgetRenderer {
 	bg := canvas.NewRectangle(color.Transparent)
 	bg.CornerRadius = 6
-	txt := canvas.NewText(t.emoji, color.NRGBA{R: 40, G: 45, B: 55, A: 255})
+	txt := widget.NewLabel(t.emoji)
 	txt.Alignment = fyne.TextAlignCenter
-	txt.TextSize = 24
 	content := container.NewMax(bg, container.NewCenter(txt))
 	return &emojiTileRenderer{tile: t, bg: bg, txt: txt, content: content}
 }
@@ -495,7 +494,7 @@ func (t *emojiTile) CreateRenderer() fyne.WidgetRenderer {
 type emojiTileRenderer struct {
 	tile    *emojiTile
 	bg      *canvas.Rectangle
-	txt     *canvas.Text
+	txt     *widget.Label
 	content *fyne.Container
 }
 
@@ -509,9 +508,8 @@ func (r *emojiTileRenderer) MinSize() fyne.Size {
 
 func (r *emojiTileRenderer) Refresh() {
 	r.bg.FillColor = color.Transparent
-	r.txt.Text = r.tile.emoji
+	r.txt.SetText(r.tile.emoji)
 	r.bg.Refresh()
-	r.txt.Refresh()
 }
 
 func (r *emojiTileRenderer) BackgroundColor() color.Color {
@@ -1135,6 +1133,7 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 			container.NewVBox(container.NewPadded(actions), lineWithColor(lineGray)),
 			nil,
 			nil,
+			nil,
 			container.NewPadded(a.inputBox),
 		),
 	)
@@ -1402,13 +1401,14 @@ func (a *appState) openEmojiPicker() {
 		return
 	}
 	emojis := []string{
-		"😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",
+		"😀", "😁", "😂", "😄", "😊", "😎", "😍", "😘",
 		"🤔", "😴", "😭", "😡", "😱", "🥳", "🤝", "👍",
-		"👏", "🙏", "💯", "🔥", "❤️", "💙", "🎉", "🌟",
+		"👎", "👏", "🙏", "💯", "🔥", "❤", "💙", "🎉",
+		"🌟", "📷", "📌", "✅", "❗", "🍀", "☕", "🎵",
 	}
 	w := a.uiApp.NewWindow("表情")
 	w.SetIcon(resourceAppIcon)
-	w.Resize(fyne.NewSize(420, 220))
+	w.Resize(fyne.NewSize(448, 280))
 	w.CenterOnScreen()
 	grid := container.NewGridWithColumns(8)
 	for _, e := range emojis {
@@ -1418,7 +1418,7 @@ func (a *appState) openEmojiPicker() {
 			w.Close()
 		}))
 	}
-	w.SetContent(container.NewPadded(grid))
+	w.SetContent(container.NewPadded(container.NewVScroll(grid)))
 	w.Show()
 }
 
@@ -1754,11 +1754,13 @@ func (a *appState) sendLocalStream(imageOnly bool) {
 		return
 	}
 	if runtime.GOOS == "windows" {
-		path, err := pickFilePathWindows(imageOnly)
-		if err != nil || path == "" {
-			return
-		}
-		a.sendLocalPath(peerKey, p, path, imageOnly)
+		go func() {
+			path, err := pickFilePathWindows(imageOnly)
+			if err != nil || path == "" {
+				return
+			}
+			a.sendLocalPath(peerKey, p, path, imageOnly)
+		}()
 		return
 	}
 	cb := func(rc fyne.URIReadCloser, err error) {
@@ -2385,17 +2387,19 @@ func wrapTextByPixel(text string, maxWidth, textSize float32, style fyne.TextSty
 			lines = append(lines, "")
 			continue
 		}
-		line := make([]rune, 0, len(seg))
-		for _, r := range seg {
-			candidate := append(append([]rune{}, line...), r)
-			if len(line) > 0 && fyne.MeasureText(string(candidate), textSize, style).Width > maxWidth {
-				lines = append(lines, string(line))
-				line = []rune{r}
-			} else {
-				line = candidate
+		current := ""
+		gr := uniseg.NewGraphemes(seg)
+		for gr.Next() {
+			g := gr.Str()
+			candidate := current + g
+			if current != "" && fyne.MeasureText(candidate, textSize, style).Width > maxWidth {
+				lines = append(lines, current)
+				current = g
+				continue
 			}
+			current = candidate
 		}
-		lines = append(lines, string(line))
+		lines = append(lines, current)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -2889,31 +2893,6 @@ func splitPeerKey(key string) (string, string) {
 	return "", ""
 }
 
-func pickFilePathWindows(imageOnly bool) (string, error) {
-	filter := "All files (*.*)|*.*"
-	if imageOnly {
-		filter = "Image files (*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp)|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|All files (*.*)|*.*"
-	}
-	script := fmt.Sprintf(`
-Add-Type -AssemblyName System.Windows.Forms
-$dlg = New-Object System.Windows.Forms.OpenFileDialog
-$dlg.Multiselect = $false
-$dlg.CheckFileExists = $true
-$dlg.Filter = '%s'
-if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-	[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-	Write-Output $dlg.FileName
-}
-`, strings.ReplaceAll(filter, "'", "''"))
-
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
 func compactLine(s string, limit int) string {
 	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, "\r", " ")
@@ -2921,13 +2900,21 @@ func compactLine(s string, limit int) string {
 	for strings.Contains(s, "  ") {
 		s = strings.ReplaceAll(s, "  ", " ")
 	}
-	if len(s) <= limit {
+	if limit <= 0 || s == "" {
+		return ""
+	}
+	gr := uniseg.NewGraphemes(s)
+	parts := make([]string, 0, limit+1)
+	for gr.Next() {
+		parts = append(parts, gr.Str())
+	}
+	if len(parts) <= limit {
 		return s
 	}
 	if limit <= 3 {
-		return s[:limit]
+		return strings.Join(parts[:limit], "")
 	}
-	return s[:limit-3] + "..."
+	return strings.Join(parts[:limit-3], "") + "..."
 }
 
 func localIPv4Addrs() []net.IP {
