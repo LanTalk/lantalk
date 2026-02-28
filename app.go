@@ -1646,7 +1646,7 @@ func copyFile(src, dst string) error {
 }
 
 func newUserCode() string {
-	return "LT-" + strings.ToUpper(randomID(16))
+	return strings.ToUpper(randomID(16))
 }
 
 func randomID(n int) string {
