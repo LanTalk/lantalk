@@ -48,7 +48,6 @@ const (
 	scanBatchSize          = 220
 	probeParallelism       = 24
 	maxEnvelopeBytes       = 1 << 20
-	maxFrameBytes          = 20 << 20
 	fileChunkBytes         = 1 << 20
 	maxFileBytes     int64 = 100 * 1024 * 1024 * 1024
 )
@@ -90,15 +89,14 @@ type discoveryPacket struct {
 }
 
 type plainPayload struct {
-	ID         string `json:"id"`
-	Kind       string `json:"kind"`
-	Text       string `json:"text,omitempty"`
-	FileName   string `json:"fileName,omitempty"`
-	FileSize   int64  `json:"fileSize,omitempty"`
-	ChunkSize  int    `json:"chunkSize,omitempty"`
-	TransferID string `json:"transferId,omitempty"`
-	Salt       string `json:"salt,omitempty"`
-	SentAt     int64  `json:"sentAt"`
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Text      string `json:"text,omitempty"`
+	FileName  string `json:"fileName,omitempty"`
+	FileSize  int64  `json:"fileSize,omitempty"`
+	ChunkSize int    `json:"chunkSize,omitempty"`
+	Salt      string `json:"salt,omitempty"`
+	SentAt    int64  `json:"sentAt"`
 }
 
 type encryptedMessage struct {
@@ -876,7 +874,7 @@ func (a *appState) sendFileStream(peerKey string, p peer, path, name string, siz
 		return err
 	}
 
-	meta := plainPayload{ID: randomID(8), Kind: metaKind, FileName: name, FileSize: size, ChunkSize: fileChunkBytes, TransferID: randomID(8), Salt: base64.StdEncoding.EncodeToString(salt), SentAt: time.Now().Unix()}
+	meta := plainPayload{ID: randomID(8), Kind: metaKind, FileName: name, FileSize: size, ChunkSize: fileChunkBytes, Salt: base64.StdEncoding.EncodeToString(salt), SentAt: time.Now().Unix()}
 	metaEnc, err := encrypt(p.PublicKey, a.cfg.PrivateKey, meta)
 	if err != nil {
 		return err
