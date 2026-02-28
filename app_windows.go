@@ -187,7 +187,6 @@ func (a *appState) saveConfig() error {
 }
 
 func (a *appState) buildUI() error {
-	var nameBar *walk.Composite
 	if err := (MainWindow{
 		AssignTo: &a.mw,
 		Title:    "LanTalk - 经典局域网聊天",
@@ -201,7 +200,6 @@ func (a *appState) buildUI() error {
 				Layout:     VBox{Margins: Margins{Left: 14, Top: 14, Right: 14, Bottom: 14}, Spacing: 8},
 				Children: []Widget{
 					Composite{
-						AssignTo:   &nameBar,
 						Background: SolidColorBrush{Color: walk.RGB(56, 142, 255)},
 						Layout:     VBox{Margins: Margins{Left: 10, Top: 8, Right: 10, Bottom: 8}},
 						Children: []Widget{
@@ -260,7 +258,6 @@ func (a *appState) buildUI() error {
 	}
 
 	a.selfLabel.SetText("昵称: " + a.cfg.Name)
-	nameBar.SetToolTipText("风格参考老版 QQ，支持局域网自动发现")
 	return nil
 }
 
