@@ -82,6 +82,7 @@ type peerRow struct {
 	Online     bool
 	Unread     int
 	LastSentAt int64
+	LastSeenAt int64
 }
 
 type knownPeer struct {
@@ -92,6 +93,7 @@ type knownPeer struct {
 	Addr       string `json:"addr,omitempty"`
 	LastText   string `json:"lastText,omitempty"`
 	LastSentAt int64  `json:"lastSentAt,omitempty"`
+	LastSeenAt int64  `json:"lastSeenAt,omitempty"`
 }
 
 type discoveryPacket struct {
@@ -176,6 +178,288 @@ func (e *chatInput) TypedKey(key *fyne.KeyEvent) {
 		return
 	}
 	e.Entry.TypedKey(key)
+}
+
+type thinSplit struct {
+	widget.BaseWidget
+	Horizontal    bool
+	Offset        float64
+	Leading       fyne.CanvasObject
+	Trailing      fyne.CanvasObject
+	LineColor     color.Color
+	LineThickness float32
+	HitThickness  float32
+}
+
+func newThinHSplit(leading, trailing fyne.CanvasObject, lineColor color.Color) *thinSplit {
+	s := &thinSplit{
+		Horizontal:    true,
+		Offset:        0.5,
+		Leading:       leading,
+		Trailing:      trailing,
+		LineColor:     lineColor,
+		LineThickness: 1,
+		HitThickness:  6,
+	}
+	s.ExtendBaseWidget(s)
+	return s
+}
+
+func newThinVSplit(top, bottom fyne.CanvasObject, lineColor color.Color) *thinSplit {
+	s := &thinSplit{
+		Horizontal:    false,
+		Offset:        0.5,
+		Leading:       top,
+		Trailing:      bottom,
+		LineColor:     lineColor,
+		LineThickness: 1,
+		HitThickness:  6,
+	}
+	s.ExtendBaseWidget(s)
+	return s
+}
+
+func (s *thinSplit) SetOffset(offset float64) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > 1 {
+		offset = 1
+	}
+	if s.Offset == offset {
+		return
+	}
+	s.Offset = offset
+	s.Refresh()
+}
+
+func (s *thinSplit) hitThickness() float32 {
+	if s.HitThickness <= 0 {
+		return 6
+	}
+	return s.HitThickness
+}
+
+func (s *thinSplit) lineThickness() float32 {
+	if s.LineThickness <= 0 {
+		return 1
+	}
+	return s.LineThickness
+}
+
+func (s *thinSplit) clampOffset(total float32) float64 {
+	hit := float64(s.hitThickness())
+	space := float64(total) - hit
+	if space <= 0 {
+		return 0.5
+	}
+	lMin := 0.0
+	tMin := 0.0
+	if s.Leading != nil && s.Leading.Visible() {
+		if s.Horizontal {
+			lMin = float64(s.Leading.MinSize().Width)
+		} else {
+			lMin = float64(s.Leading.MinSize().Height)
+		}
+	}
+	if s.Trailing != nil && s.Trailing.Visible() {
+		if s.Horizontal {
+			tMin = float64(s.Trailing.MinSize().Width)
+		} else {
+			tMin = float64(s.Trailing.MinSize().Height)
+		}
+	}
+	min := lMin / space
+	max := 1 - (tMin / space)
+	offset := s.Offset
+	if min <= max {
+		if offset < min {
+			offset = min
+		}
+		if offset > max {
+			offset = max
+		}
+		return offset
+	}
+	if lMin+tMin <= 0 {
+		return 0.5
+	}
+	return lMin / (lMin + tMin)
+}
+
+func (s *thinSplit) CreateRenderer() fyne.WidgetRenderer {
+	s.ExtendBaseWidget(s)
+	d := &thinDivider{split: s}
+	d.ExtendBaseWidget(d)
+	return &thinSplitRenderer{
+		split:   s,
+		divider: d,
+		objects: []fyne.CanvasObject{s.Leading, d, s.Trailing},
+	}
+}
+
+type thinSplitRenderer struct {
+	split   *thinSplit
+	divider *thinDivider
+	objects []fyne.CanvasObject
+}
+
+func (r *thinSplitRenderer) Destroy() {}
+
+func (r *thinSplitRenderer) Layout(size fyne.Size) {
+	hit := r.split.hitThickness()
+	if r.split.Horizontal {
+		offset := r.split.clampOffset(size.Width)
+		space := float64(size.Width - hit)
+		lead := float32(offset * space)
+		if lead < 0 {
+			lead = 0
+		}
+		trail := size.Width - hit - lead
+		if trail < 0 {
+			trail = 0
+		}
+		r.split.Leading.Move(fyne.NewPos(0, 0))
+		r.split.Leading.Resize(fyne.NewSize(lead, size.Height))
+		r.divider.Move(fyne.NewPos(lead, 0))
+		r.divider.Resize(fyne.NewSize(hit, size.Height))
+		r.split.Trailing.Move(fyne.NewPos(lead+hit, 0))
+		r.split.Trailing.Resize(fyne.NewSize(trail, size.Height))
+	} else {
+		offset := r.split.clampOffset(size.Height)
+		space := float64(size.Height - hit)
+		lead := float32(offset * space)
+		if lead < 0 {
+			lead = 0
+		}
+		trail := size.Height - hit - lead
+		if trail < 0 {
+			trail = 0
+		}
+		r.split.Leading.Move(fyne.NewPos(0, 0))
+		r.split.Leading.Resize(fyne.NewSize(size.Width, lead))
+		r.divider.Move(fyne.NewPos(0, lead))
+		r.divider.Resize(fyne.NewSize(size.Width, hit))
+		r.split.Trailing.Move(fyne.NewPos(0, lead+hit))
+		r.split.Trailing.Resize(fyne.NewSize(size.Width, trail))
+	}
+	canvas.Refresh(r.divider)
+}
+
+func (r *thinSplitRenderer) MinSize() fyne.Size {
+	if r.split.Horizontal {
+		h := fyne.Max(r.split.Leading.MinSize().Height, r.split.Trailing.MinSize().Height)
+		w := r.split.Leading.MinSize().Width + r.split.hitThickness() + r.split.Trailing.MinSize().Width
+		return fyne.NewSize(w, h)
+	}
+	w := fyne.Max(r.split.Leading.MinSize().Width, r.split.Trailing.MinSize().Width)
+	h := r.split.Leading.MinSize().Height + r.split.hitThickness() + r.split.Trailing.MinSize().Height
+	return fyne.NewSize(w, h)
+}
+
+func (r *thinSplitRenderer) Objects() []fyne.CanvasObject { return r.objects }
+
+func (r *thinSplitRenderer) Refresh() {
+	r.objects[0] = r.split.Leading
+	r.objects[2] = r.split.Trailing
+	r.Layout(r.split.Size())
+	r.split.Leading.Refresh()
+	r.divider.Refresh()
+	r.split.Trailing.Refresh()
+	canvas.Refresh(r.split)
+}
+
+type thinDivider struct {
+	widget.BaseWidget
+	split        *thinSplit
+	startDragOff *fyne.Position
+	currentPos   fyne.Position
+}
+
+func (d *thinDivider) Cursor() desktop.Cursor {
+	if d.split.Horizontal {
+		return desktop.HResizeCursor
+	}
+	return desktop.VResizeCursor
+}
+
+func (d *thinDivider) DragEnd() {
+	d.startDragOff = nil
+}
+
+func (d *thinDivider) Dragged(e *fyne.DragEvent) {
+	if d.startDragOff == nil {
+		d.currentPos = d.Position().Add(e.Position)
+		start := e.Position.Subtract(e.Dragged)
+		d.startDragOff = &start
+	} else {
+		d.currentPos = d.currentPos.Add(e.Dragged)
+	}
+	var offset float64
+	if d.split.Horizontal {
+		space := float64(d.split.Size().Width - d.split.hitThickness())
+		if space <= 0 {
+			return
+		}
+		offset = float64(d.currentPos.X-d.startDragOff.X) / space
+	} else {
+		space := float64(d.split.Size().Height - d.split.hitThickness())
+		if space <= 0 {
+			return
+		}
+		offset = float64(d.currentPos.Y-d.startDragOff.Y) / space
+	}
+	d.split.SetOffset(offset)
+}
+
+func (d *thinDivider) CreateRenderer() fyne.WidgetRenderer {
+	bg := canvas.NewRectangle(color.Transparent)
+	line := canvas.NewRectangle(d.split.LineColor)
+	return &thinDividerRenderer{
+		divider: d,
+		bg:      bg,
+		line:    line,
+		objects: []fyne.CanvasObject{bg, line},
+	}
+}
+
+type thinDividerRenderer struct {
+	divider *thinDivider
+	bg      *canvas.Rectangle
+	line    *canvas.Rectangle
+	objects []fyne.CanvasObject
+}
+
+func (r *thinDividerRenderer) Destroy() {}
+
+func (r *thinDividerRenderer) Layout(size fyne.Size) {
+	r.bg.Resize(size)
+	t := r.divider.split.lineThickness()
+	if r.divider.split.Horizontal {
+		x := (size.Width - t) / 2
+		r.line.Move(fyne.NewPos(x, 0))
+		r.line.Resize(fyne.NewSize(t, size.Height))
+	} else {
+		y := (size.Height - t) / 2
+		r.line.Move(fyne.NewPos(0, y))
+		r.line.Resize(fyne.NewSize(size.Width, t))
+	}
+}
+
+func (r *thinDividerRenderer) MinSize() fyne.Size {
+	if r.divider.split.Horizontal {
+		return fyne.NewSize(r.divider.split.hitThickness(), 1)
+	}
+	return fyne.NewSize(1, r.divider.split.hitThickness())
+}
+
+func (r *thinDividerRenderer) Objects() []fyne.CanvasObject { return r.objects }
+
+func (r *thinDividerRenderer) Refresh() {
+	r.line.FillColor = r.divider.split.LineColor
+	r.line.Refresh()
+	r.bg.Refresh()
+	r.Layout(r.divider.Size())
 }
 
 type emojiTile struct {
@@ -519,6 +803,9 @@ func mergeKnownPeer(base, in knownPeer) knownPeer {
 	} else if strings.TrimSpace(out.LastText) == "" && strings.TrimSpace(in.LastText) != "" {
 		out.LastText = strings.TrimSpace(in.LastText)
 	}
+	if in.LastSeenAt > out.LastSeenAt {
+		out.LastSeenAt = in.LastSeenAt
+	}
 	return out
 }
 
@@ -699,6 +986,10 @@ func (a *appState) upsertKnownPeerLocked(key string, in knownPeer) bool {
 			changed = true
 		}
 	}
+	if in.LastSeenAt > cur.LastSeenAt {
+		cur.LastSeenAt = in.LastSeenAt
+		changed = true
+	}
 	if _, ok := a.knownPeers[key]; !ok {
 		changed = true
 	}
@@ -847,11 +1138,14 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 			container.NewPadded(a.inputBox),
 		),
 	)
-	chatBodySplit := container.NewVSplit(
+	chatBodySplit := newThinVSplit(
 		container.NewMax(canvas.NewRectangle(rightGray), container.NewPadded(a.chatScroll)),
 		composePanel,
+		lineGray,
 	)
-	chatBodySplit.Offset = 0.78
+	chatBodySplit.LineThickness = 0.5
+	chatBodySplit.HitThickness = 6
+	chatBodySplit.SetOffset(0.78)
 	a.chatPanel = container.NewBorder(
 		container.NewVBox(container.NewPadded(headerRow), lineWithColor(lineGray)),
 		nil,
@@ -861,8 +1155,10 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	)
 	a.rightHost = container.NewMax(blankRightPanel())
 
-	mainSplit := container.NewHSplit(middlePanel, a.rightHost)
-	mainSplit.Offset = 0.33
+	mainSplit := newThinHSplit(middlePanel, a.rightHost, lineGray)
+	mainSplit.LineThickness = 0.5
+	mainSplit.HitThickness = 6
+	mainSplit.SetOffset(0.33)
 	root := container.NewBorder(
 		nil,
 		nil,
@@ -1846,6 +2142,7 @@ func (a *appState) upsertPeer(in peer) {
 		InstanceID: in.InstanceID,
 		Name:       in.Name,
 		Addr:       in.Addr,
+		LastSeenAt: in.LastSeen.Unix(),
 	})
 	a.mu.Unlock()
 	if changed {
@@ -1922,6 +2219,13 @@ func (a *appState) refreshContacts() {
 		if unreadCount > 0 {
 			preview = fmt.Sprintf("(%d) %s", unreadCount, preview)
 		}
+		lastSeenAt := kp.LastSeenAt
+		if online {
+			seen := p.LastSeen.Unix()
+			if seen > lastSeenAt {
+				lastSeenAt = seen
+			}
+		}
 		rows = append(rows, peerRow{
 			Key:        key,
 			Name:       name,
@@ -1929,14 +2233,26 @@ func (a *appState) refreshContacts() {
 			Online:     online,
 			Unread:     unreadCount,
 			LastSentAt: kp.LastSentAt,
+			LastSeenAt: lastSeenAt,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Online != rows[j].Online {
-			return rows[i].Online
+		iHasChat := rows[i].LastSentAt > 0
+		jHasChat := rows[j].LastSentAt > 0
+		if iHasChat != jHasChat {
+			return iHasChat
 		}
-		if rows[i].LastSentAt != rows[j].LastSentAt {
-			return rows[i].LastSentAt > rows[j].LastSentAt
+		if iHasChat {
+			if rows[i].LastSentAt != rows[j].LastSentAt {
+				return rows[i].LastSentAt > rows[j].LastSentAt
+			}
+		} else {
+			if rows[i].LastSeenAt != rows[j].LastSeenAt {
+				return rows[i].LastSeenAt > rows[j].LastSeenAt
+			}
+			if rows[i].Online != rows[j].Online {
+				return rows[i].Online
+			}
 		}
 		return strings.ToLower(rows[i].Name) < strings.ToLower(rows[j].Name)
 	})
