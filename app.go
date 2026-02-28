@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"image/color"
 	"io"
-	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -262,9 +261,6 @@ func (appTheme) Size(name fyne.ThemeSizeName) float32 {
 	if name == theme.SizeNamePadding {
 		return 1
 	}
-	if name == theme.SizeNameInputBorder {
-		return 0
-	}
 	return theme.DefaultTheme().Size(name)
 }
 
@@ -395,33 +391,26 @@ func (a *appState) initStorage() error {
 }
 
 func (a *appState) selectStorageSlot() error {
-	for i := 0; i < 1000; i++ {
-		name := "data"
-		if i > 0 {
-			name = fmt.Sprintf("data(%d)", i)
-		}
-		root := filepath.Join(a.baseDir, name)
-		if err := os.MkdirAll(root, 0o755); err != nil {
-			return err
-		}
-		lockPath := filepath.Join(root, ".lantalk.lock")
-		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				continue
-			}
-			return err
-		}
-		_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
-		a.dataLockFile = lockFile
-		a.dataLockPath = lockPath
-		a.dataDir = root
-		a.chatsDir = filepath.Join(root, "chats")
-		a.downloadsDir = filepath.Join(root, "downloads")
-		a.profileDir = filepath.Join(root, "profile")
-		return nil
+	root := filepath.Join(a.baseDir, "data")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
 	}
-	return errors.New("no available data directory slot")
+	lockPath := filepath.Join(root, ".lantalk.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return errors.New("lantalk is already running in this folder")
+		}
+		return err
+	}
+	_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+	a.dataLockFile = lockFile
+	a.dataLockPath = lockPath
+	a.dataDir = root
+	a.chatsDir = filepath.Join(root, "chats")
+	a.downloadsDir = filepath.Join(root, "downloads")
+	a.profileDir = filepath.Join(root, "profile")
+	return nil
 }
 
 func (a *appState) saveConfig() error {
@@ -799,6 +788,11 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	)
 
 	middlePanel := container.NewMax(
+		func() fyne.CanvasObject {
+			sz := canvas.NewRectangle(color.Transparent)
+			sz.SetMinSize(fyne.NewSize(320, 1))
+			return sz
+		}(),
 		canvas.NewRectangle(color.White),
 		a.contactBox,
 	)
@@ -832,40 +826,44 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 		layout.NewSpacer(),
 		profileBtn,
 	)
-	actions := container.NewHBox(emojiBtn, imageBtn, fileBtn, spacerBox(6))
+	actions := container.NewHBox(emojiBtn, imageBtn, fileBtn)
 	composePanel := container.NewMax(
 		canvas.NewRectangle(rightGray),
 		container.NewBorder(
+			container.NewVBox(container.NewPadded(actions), lineWithColor(lineGray)),
 			nil,
-			nil,
-			container.NewPadded(actions),
 			nil,
 			container.NewPadded(a.inputBox),
 		),
 	)
-	chatBodySplit := container.NewVSplit(
+	chatBody := container.NewBorder(
+		nil,
+		container.NewVBox(lineWithColor(lineGray), composePanel),
+		nil,
+		nil,
 		container.NewMax(canvas.NewRectangle(rightGray), container.NewPadded(a.chatScroll)),
-		composePanel,
 	)
-	chatBodySplit.Offset = 0.78
 	a.chatPanel = container.NewBorder(
 		container.NewVBox(container.NewPadded(headerRow), lineWithColor(lineGray)),
 		nil,
 		nil,
 		nil,
-		chatBodySplit,
+		chatBody,
 	)
 	a.rightHost = container.NewMax(blankRightPanel())
 
-	mainSplit := container.NewHSplit(middlePanel, a.rightHost)
-	mainSplit.Offset = 0.33
-
+	leftBlock := container.NewHBox(
+		leftRail,
+		lineWithColor(lineGray),
+		middlePanel,
+		lineWithColor(lineGray),
+	)
 	root := container.NewBorder(
 		nil,
 		nil,
-		container.NewBorder(nil, nil, nil, lineWithColor(lineGray), leftRail),
+		leftBlock,
 		nil,
-		mainSplit,
+		a.rightHost,
 	)
 	return container.NewMax(canvas.NewRectangle(rightGray), root)
 }
@@ -2088,7 +2086,7 @@ func spacerBox(w float32) *canvas.Rectangle {
 
 func lineWithColor(c color.Color) *canvas.Rectangle {
 	line := canvas.NewRectangle(c)
-	line.SetMinSize(fyne.NewSize(1, 1))
+	line.SetMinSize(fyne.NewSize(0.5, 0.5))
 	return line
 }
 
