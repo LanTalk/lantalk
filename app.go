@@ -246,11 +246,11 @@ func (appTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color
 	case theme.ColorNameBackground:
 		return color.NRGBA{R: 244, G: 246, B: 248, A: 255}
 	case theme.ColorNameInputBackground:
-		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+		return color.NRGBA{R: 244, G: 246, B: 248, A: 255}
 	case theme.ColorNameShadow:
-		return color.NRGBA{R: 220, G: 224, B: 229, A: 255}
+		return color.NRGBA{R: 225, G: 229, B: 234, A: 255}
 	case theme.ColorNameHover:
-		return color.NRGBA{R: 232, G: 236, B: 241, A: 255}
+		return color.NRGBA{R: 228, G: 232, B: 238, A: 255}
 	default:
 		return theme.DefaultTheme().Color(name, variant)
 	}
@@ -259,7 +259,10 @@ func (appTheme) Font(style fyne.TextStyle) fyne.Resource    { return theme.Defau
 func (appTheme) Icon(name fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(name) }
 func (appTheme) Size(name fyne.ThemeSizeName) float32 {
 	if name == theme.SizeNamePadding {
-		return 2
+		return 1
+	}
+	if name == theme.SizeNameInputBorder {
+		return 0
 	}
 	return theme.DefaultTheme().Size(name)
 }
@@ -779,12 +782,15 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	a.chatScroll.Direction = container.ScrollVerticalOnly
 
 	a.inputBox = newChatInput(func() { a.sendCurrentText() })
-	a.inputBox.SetMinRowsVisible(5)
+	a.inputBox.SetMinRowsVisible(4)
 	a.inputBox.SetPlaceHolder("输入消息")
 
-	emojiBtn := widget.NewButtonWithIcon("表情", theme.ContentAddIcon(), func() { a.openEmojiPicker() })
-	fileBtn := widget.NewButtonWithIcon("文件", theme.FileIcon(), func() { a.sendCurrentFile() })
-	imageBtn := widget.NewButtonWithIcon("图片", theme.FileImageIcon(), func() { a.sendCurrentImage() })
+	emojiBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() { a.openEmojiPicker() })
+	fileBtn := widget.NewButtonWithIcon("", theme.FileIcon(), func() { a.sendCurrentFile() })
+	imageBtn := widget.NewButtonWithIcon("", theme.FileImageIcon(), func() { a.sendCurrentImage() })
+	emojiBtn.Importance = widget.LowImportance
+	fileBtn.Importance = widget.LowImportance
+	imageBtn.Importance = widget.LowImportance
 	a.statusBar = widget.NewLabel("")
 	a.statusBar.Hide()
 
@@ -794,13 +800,13 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 		layout.NewSpacer(),
 		profileBtn,
 	)
-	actions := container.NewHBox(emojiBtn, fileBtn, imageBtn)
+	actions := container.NewHBox(emojiBtn, imageBtn, fileBtn, spacerBox(6))
 	composePanel := container.NewMax(
-		canvas.NewRectangle(color.White),
+		canvas.NewRectangle(rightGray),
 		container.NewBorder(
-			container.NewVBox(container.NewPadded(actions), lineWithColor(lineGray)),
 			nil,
 			nil,
+			container.NewPadded(actions),
 			nil,
 			container.NewPadded(a.inputBox),
 		),
@@ -1772,15 +1778,12 @@ func (a *appState) upsertPeer(in peer) {
 	}
 	a.mu.Lock()
 	exist := a.peers[in.Key]
-	if exist != nil && exist.PublicKey != "" && exist.PublicKey != in.PublicKey {
-		a.mu.Unlock()
-		return
-	}
 	if exist == nil {
 		cp := in
 		a.peers[in.Key] = &cp
 	} else {
 		exist.Name = in.Name
+		exist.PublicKey = in.PublicKey
 		if in.Addr != "" {
 			exist.Addr = in.Addr
 		}
