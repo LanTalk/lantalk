@@ -136,7 +136,7 @@ type historyLine struct {
 	SentAt    int64  `json:"sentAt"`
 }
 
-type oldQQTheme struct{}
+type appTheme struct{}
 
 type chatInput struct {
 	widget.Entry
@@ -238,21 +238,30 @@ func (r *emojiTileRenderer) Objects() []fyne.CanvasObject {
 
 func (r *emojiTileRenderer) Destroy() {}
 
-func (oldQQTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+func (appTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 53, G: 146, B: 255, A: 255}
+		return color.NRGBA{R: 107, G: 117, B: 126, A: 255}
 	case theme.ColorNameBackground:
-		return color.NRGBA{R: 244, G: 249, B: 255, A: 255}
+		return color.NRGBA{R: 244, G: 246, B: 248, A: 255}
 	case theme.ColorNameInputBackground:
 		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	case theme.ColorNameShadow:
+		return color.NRGBA{R: 220, G: 224, B: 229, A: 255}
+	case theme.ColorNameHover:
+		return color.NRGBA{R: 232, G: 236, B: 241, A: 255}
 	default:
 		return theme.DefaultTheme().Color(name, variant)
 	}
 }
-func (oldQQTheme) Font(style fyne.TextStyle) fyne.Resource    { return theme.DefaultTheme().Font(style) }
-func (oldQQTheme) Icon(name fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(name) }
-func (oldQQTheme) Size(name fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(name) }
+func (appTheme) Font(style fyne.TextStyle) fyne.Resource    { return theme.DefaultTheme().Font(style) }
+func (appTheme) Icon(name fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(name) }
+func (appTheme) Size(name fyne.ThemeSizeName) float32 {
+	if name == theme.SizeNamePadding {
+		return 2
+	}
+	return theme.DefaultTheme().Size(name)
+}
 
 type appState struct {
 	baseDir        string
@@ -268,7 +277,6 @@ type appState struct {
 	knownPeers     map[string]knownPeer
 	unread         map[string]int
 	peerRows       []peerRow
-	peerFilter     string
 	activeKey      string
 	scanOffset     int
 	tcpListener    net.Listener
@@ -278,7 +286,6 @@ type appState struct {
 	uiApp          fyne.App
 	win            fyne.Window
 	contactBox     *widget.List
-	searchInput    *widget.Entry
 	rightHost      *fyne.Container
 	chatPanel      fyne.CanvasObject
 	selfAvatar     *canvas.Image
@@ -513,7 +520,7 @@ func (a *appState) upsertKnownPeerLocked(key string, in knownPeer) bool {
 func (a *appState) buildUI() error {
 	a.uiApp = app.NewWithID("lantalk")
 	a.uiApp.SetIcon(resourceAppIcon)
-	a.uiApp.Settings().SetTheme(oldQQTheme{})
+	a.uiApp.Settings().SetTheme(appTheme{})
 	a.win = a.uiApp.NewWindow("LanTalk")
 	a.win.SetIcon(resourceAppIcon)
 	a.win.Resize(fyne.NewSize(1120, 740))
@@ -527,15 +534,6 @@ func (a *appState) buildUI() error {
 }
 
 func (a *appState) buildChatPage() fyne.CanvasObject {
-	a.searchInput = widget.NewEntry()
-	a.searchInput.SetPlaceHolder("搜索好友")
-	a.searchInput.OnChanged = func(v string) {
-		a.mu.Lock()
-		a.peerFilter = strings.TrimSpace(v)
-		a.mu.Unlock()
-		a.refreshContacts()
-	}
-
 	a.contactBox = widget.NewList(
 		func() int {
 			a.mu.Lock()
@@ -543,21 +541,21 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 			return len(a.peerRows)
 		},
 		func() fyne.CanvasObject {
-			avatar := avatarImage("", 36)
-			avatarWrap := container.NewPadded(avatar)
+			avatar := avatarImage("", 32)
 
 			name := widget.NewLabel("")
 			name.TextStyle = fyne.TextStyle{Bold: true}
 			dotBase := canvas.NewRectangle(color.Transparent)
-			dotBase.SetMinSize(fyne.NewSize(10, 10))
+			dotBase.SetMinSize(fyne.NewSize(8, 8))
 			statusDot := canvas.NewCircle(color.NRGBA{R: 153, G: 160, B: 170, A: 255})
 			statusWrap := container.NewMax(dotBase, statusDot)
 			top := container.NewHBox(name, spacerBox(6), statusWrap, layout.NewSpacer())
 
 			preview := widget.NewLabel("")
 			preview.Wrapping = fyne.TextWrapOff
+			preview.Importance = widget.LowImportance
 			textCol := container.NewVBox(top, preview)
-			return container.NewHBox(avatarWrap, textCol)
+			return container.NewHBox(spacerBox(8), avatar, spacerBox(8), textCol, spacerBox(8))
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			a.mu.Lock()
@@ -567,7 +565,7 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 			}
 			a.mu.Unlock()
 			c := obj.(*fyne.Container)
-			textCol := c.Objects[1].(*fyne.Container)
+			textCol := c.Objects[3].(*fyne.Container)
 			top := textCol.Objects[0].(*fyne.Container)
 			nameLabel := top.Objects[0].(*widget.Label)
 			statusWrap := top.Objects[2].(*fyne.Container)
@@ -585,45 +583,32 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	)
 	a.contactBox.OnSelected = func(id widget.ListItemID) { a.selectPeer(int(id)) }
 
-	lightGray := color.NRGBA{R: 244, G: 246, B: 248, A: 255}
-	lineGray := color.NRGBA{R: 224, G: 228, B: 233, A: 255}
+	leftGray := color.NRGBA{R: 236, G: 239, B: 243, A: 255}
+	rightGray := color.NRGBA{R: 244, G: 246, B: 248, A: 255}
+	lineGray := color.NRGBA{R: 220, G: 224, B: 229, A: 255}
 
-	a.selfAvatar = avatarImage(a.avatarAbsPath(), 42)
+	a.selfAvatar = avatarImage(a.avatarAbsPath(), 40)
 	settingBtn := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
 		a.openSettingsWindow()
 	})
+	settingBtn.Importance = widget.LowImportance
 	railSize := canvas.NewRectangle(color.Transparent)
-	railSize.SetMinSize(fyne.NewSize(72, 1))
+	railSize.SetMinSize(fyne.NewSize(58, 1))
 	leftRail := container.NewMax(
 		railSize,
-		canvas.NewRectangle(color.White),
+		canvas.NewRectangle(leftGray),
 		container.NewBorder(
 			container.NewPadded(a.selfAvatar),
-			container.NewPadded(settingBtn),
+			container.NewCenter(settingBtn),
 			nil,
 			nil,
 			nil,
 		),
 	)
 
-	searchBg := canvas.NewRectangle(color.White)
-	searchBg.CornerRadius = 8
-	searchBar := container.NewMax(
-		searchBg,
-		container.NewPadded(container.NewHBox(widget.NewIcon(theme.SearchIcon()), a.searchInput)),
-	)
-	midSize := canvas.NewRectangle(color.Transparent)
-	midSize.SetMinSize(fyne.NewSize(320, 1))
 	middlePanel := container.NewMax(
-		midSize,
 		canvas.NewRectangle(color.White),
-		container.NewBorder(
-			container.NewVBox(container.NewPadded(searchBar), lineWithColor(lineGray)),
-			nil,
-			nil,
-			nil,
-			a.contactBox,
-		),
+		a.contactBox,
 	)
 
 	a.headerAvatar = avatarImage("", 44)
@@ -653,28 +638,41 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 		profileBtn,
 	)
 	actions := container.NewHBox(emojiBtn, fileBtn, imageBtn)
-	a.chatPanel = container.NewBorder(
-		container.NewVBox(container.NewPadded(headerRow), lineWithColor(lineGray)),
-		container.NewVBox(
-			lineWithColor(lineGray),
-			container.NewPadded(actions),
-			lineWithColor(lineGray),
+	composePanel := container.NewMax(
+		canvas.NewRectangle(color.White),
+		container.NewBorder(
+			container.NewVBox(container.NewPadded(actions), lineWithColor(lineGray)),
+			nil,
+			nil,
+			nil,
 			container.NewPadded(a.inputBox),
 		),
+	)
+	chatBodySplit := container.NewVSplit(
+		container.NewMax(canvas.NewRectangle(rightGray), container.NewPadded(a.chatScroll)),
+		composePanel,
+	)
+	chatBodySplit.Offset = 0.78
+	a.chatPanel = container.NewBorder(
+		container.NewVBox(container.NewPadded(headerRow), lineWithColor(lineGray)),
 		nil,
 		nil,
-		container.NewMax(canvas.NewRectangle(lightGray), container.NewPadded(a.chatScroll)),
+		nil,
+		chatBodySplit,
 	)
 	a.rightHost = container.NewMax(blankRightPanel())
 
-	root := container.NewHBox(
-		leftRail,
-		lineWithColor(lineGray),
-		middlePanel,
-		lineWithColor(lineGray),
-		a.rightHost,
+	mainSplit := container.NewHSplit(middlePanel, a.rightHost)
+	mainSplit.Offset = 0.33
+
+	root := container.NewBorder(
+		nil,
+		nil,
+		container.NewBorder(nil, nil, nil, lineWithColor(lineGray), leftRail),
+		nil,
+		mainSplit,
 	)
-	return container.NewMax(canvas.NewRectangle(lightGray), root)
+	return container.NewMax(canvas.NewRectangle(rightGray), root)
 }
 
 func (a *appState) openSettingsWindow() {
@@ -1605,6 +1603,12 @@ func (a *appState) upsertPeer(in peer) {
 		_ = a.saveKnownPeers()
 	}
 	a.refreshContacts()
+	a.mu.Lock()
+	active := a.activeKey
+	a.mu.Unlock()
+	if active == in.Key {
+		a.refreshHeaderByKey(active)
+	}
 }
 
 func (a *appState) refreshContacts() {
@@ -1623,7 +1627,6 @@ func (a *appState) refreshContacts() {
 	for k, v := range a.unread {
 		unread[k] = v
 	}
-	filter := strings.ToLower(strings.TrimSpace(a.peerFilter))
 	a.mu.Unlock()
 
 	keys := map[string]struct{}{}
@@ -1669,10 +1672,6 @@ func (a *appState) refreshContacts() {
 		unreadCount := unread[key]
 		if unreadCount > 0 {
 			preview = fmt.Sprintf("(%d) %s", unreadCount, preview)
-		}
-		probe := strings.ToLower(name + " " + preview + " " + id)
-		if filter != "" && !strings.Contains(probe, filter) {
-			continue
 		}
 		rows = append(rows, peerRow{
 			Key:        key,
@@ -1739,7 +1738,7 @@ func (a *appState) renderHistory(peerKey string) {
 	history, _ := a.loadHistory(peerKey)
 	items := make([]fyne.CanvasObject, 0, len(history))
 	for _, m := range history {
-		items = append(items, renderBubbleMessage(m))
+		items = append(items, a.renderBubbleMessage(m))
 	}
 	a.safeUI(func() {
 		if a.chatStream == nil {
@@ -1753,7 +1752,7 @@ func (a *appState) renderHistory(peerKey string) {
 	})
 }
 
-func renderBubbleMessage(m historyLine) fyne.CanvasObject {
+func (a *appState) renderBubbleMessage(m historyLine) fyne.CanvasObject {
 	outgoing := m.Direction == "out"
 	meta := time.Unix(m.SentAt, 0).Format("15:04")
 	if outgoing {
@@ -1779,7 +1778,24 @@ func renderBubbleMessage(m historyLine) fyne.CanvasObject {
 
 	var metaRow *fyne.Container
 	var bodyRow *fyne.Container
-	maxGuard := spacerBox(320)
+	guard := float32(260)
+	if a.chatScroll != nil {
+		if w := a.chatScroll.Size().Width; w > 0 {
+			maxBubble := w * 0.68
+			if maxBubble > 560 {
+				maxBubble = 560
+			}
+			if maxBubble < 220 {
+				maxBubble = 220
+			}
+			if g := w - maxBubble - 40; g > 0 {
+				guard = g
+			} else {
+				guard = 0
+			}
+		}
+	}
+	maxGuard := spacerBox(guard)
 	if outgoing {
 		metaRow = container.NewHBox(layout.NewSpacer(), metaLabel)
 		bodyRow = container.NewHBox(maxGuard, layout.NewSpacer(), container.NewPadded(bubble), spacerBox(20))
@@ -1803,7 +1819,7 @@ func lineWithColor(c color.Color) *canvas.Rectangle {
 }
 
 func blankRightPanel() fyne.CanvasObject {
-	bg := canvas.NewRectangle(color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+	bg := canvas.NewRectangle(color.NRGBA{R: 244, G: 246, B: 248, A: 255})
 	return container.NewMax(bg, layout.NewSpacer())
 }
 
