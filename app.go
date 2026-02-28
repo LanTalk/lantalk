@@ -266,6 +266,8 @@ type appState struct {
 	win            fyne.Window
 	contactBox     *widget.List
 	searchInput    *widget.Entry
+	rightHost      *fyne.Container
+	chatPanel      fyne.CanvasObject
 	topInfo        *widget.Label
 	chatHeader     *widget.Label
 	chatSubHeader  *widget.Label
@@ -465,13 +467,24 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 		layout.NewSpacer(),
 		profileBtn,
 	)
-	chatSplit := container.NewVSplit(a.chatScroll, a.inputBox)
-	chatSplit.Offset = 0.78
-	actions := container.NewHBox(refreshBtn, emojiBtn, imageBtn, fileBtn, clearBtn, layout.NewSpacer(), sendBtn)
-	rightCard := widget.NewCard("", "", container.NewBorder(headerRow, container.NewVBox(actions, a.statusBar), nil, nil, chatSplit))
-	right := container.NewPadded(rightCard)
+	actions := container.NewHBox(refreshBtn, emojiBtn, imageBtn, fileBtn, clearBtn)
+	composer := container.NewBorder(
+		nil,
+		a.statusBar,
+		actions,
+		sendBtn,
+		a.inputBox,
+	)
+	a.chatPanel = container.NewBorder(
+		container.NewVBox(container.NewPadded(headerRow), thinLine()),
+		container.NewVBox(thinLine(), container.NewPadded(composer)),
+		nil,
+		nil,
+		container.NewPadded(a.chatScroll),
+	)
+	a.rightHost = container.NewMax(blankRightPanel())
 
-	split := container.NewHSplit(left, right)
+	split := container.NewHSplit(left, a.rightHost)
 	split.Offset = 0.32
 
 	title := widget.NewLabel("LanTalk")
@@ -749,8 +762,10 @@ func (a *appState) refreshHeaderByKey(key string) {
 	p := a.peers[key]
 	a.mu.Unlock()
 	if p == nil {
+		a.showBlankPanel()
 		return
 	}
+	a.showChatPanel()
 	a.safeUI(func() {
 		a.chatHeader.SetText(a.displayNameForPeer(p))
 		a.chatSubHeader.SetText("局域网在线")
@@ -1163,6 +1178,7 @@ func (a *appState) startDiscovery(chatPort int) error {
 			select {
 			case <-ticker.C:
 				changed := false
+				activeLost := false
 				now := time.Now()
 				a.mu.Lock()
 				for key, p := range a.peers {
@@ -1171,12 +1187,16 @@ func (a *appState) startDiscovery(chatPort int) error {
 						changed = true
 						if a.activeKey == key {
 							a.activeKey = ""
+							activeLost = true
 						}
 					}
 				}
 				a.mu.Unlock()
 				if changed {
 					a.refreshContacts()
+					if activeLost {
+						a.showBlankPanel()
+					}
 				}
 			case <-a.stopCh:
 				return
@@ -1486,6 +1506,37 @@ func spacerBox(w float32) *canvas.Rectangle {
 	box := canvas.NewRectangle(color.Transparent)
 	box.SetMinSize(fyne.NewSize(w, 1))
 	return box
+}
+
+func thinLine() *canvas.Rectangle {
+	line := canvas.NewRectangle(color.NRGBA{R: 220, G: 227, B: 236, A: 255})
+	line.SetMinSize(fyne.NewSize(1, 1))
+	return line
+}
+
+func blankRightPanel() fyne.CanvasObject {
+	bg := canvas.NewRectangle(color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+	return container.NewMax(bg, layout.NewSpacer())
+}
+
+func (a *appState) showChatPanel() {
+	a.safeUI(func() {
+		if a.rightHost == nil || a.chatPanel == nil {
+			return
+		}
+		a.rightHost.Objects = []fyne.CanvasObject{a.chatPanel}
+		a.rightHost.Refresh()
+	})
+}
+
+func (a *appState) showBlankPanel() {
+	a.safeUI(func() {
+		if a.rightHost == nil {
+			return
+		}
+		a.rightHost.Objects = []fyne.CanvasObject{blankRightPanel()}
+		a.rightHost.Refresh()
+	})
 }
 
 func (a *appState) refreshChatIfActive(peerKey string) {
