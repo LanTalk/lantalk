@@ -17,6 +17,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -259,7 +260,7 @@ func (appTheme) Font(style fyne.TextStyle) fyne.Resource    { return theme.Defau
 func (appTheme) Icon(name fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(name) }
 func (appTheme) Size(name fyne.ThemeSizeName) float32 {
 	if name == theme.SizeNamePadding {
-		return 1
+		return 0.5
 	}
 	return theme.DefaultTheme().Size(name)
 }
@@ -391,26 +392,33 @@ func (a *appState) initStorage() error {
 }
 
 func (a *appState) selectStorageSlot() error {
-	root := filepath.Join(a.baseDir, "data")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return err
-	}
-	lockPath := filepath.Join(root, ".lantalk.lock")
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		if os.IsExist(err) {
-			return errors.New("lantalk is already running in this folder")
+	for i := 0; i < 1000; i++ {
+		name := "data"
+		if i > 0 {
+			name = fmt.Sprintf("data(%d)", i)
 		}
-		return err
+		root := filepath.Join(a.baseDir, name)
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return err
+		}
+		lockPath := filepath.Join(root, ".lantalk.lock")
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return err
+		}
+		_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+		a.dataLockFile = lockFile
+		a.dataLockPath = lockPath
+		a.dataDir = root
+		a.chatsDir = filepath.Join(root, "chats")
+		a.downloadsDir = filepath.Join(root, "downloads")
+		a.profileDir = filepath.Join(root, "profile")
+		return nil
 	}
-	_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
-	a.dataLockFile = lockFile
-	a.dataLockPath = lockPath
-	a.dataDir = root
-	a.chatsDir = filepath.Join(root, "chats")
-	a.downloadsDir = filepath.Join(root, "downloads")
-	a.profileDir = filepath.Join(root, "profile")
-	return nil
+	return errors.New("no available data directory slot")
 }
 
 func (a *appState) saveConfig() error {
@@ -711,6 +719,9 @@ func (a *appState) buildUI() error {
 		a.shutdown()
 		a.win.Close()
 	})
+	a.win.SetOnDropped(func(pos fyne.Position, items []fyne.URI) {
+		a.handleDropOnInput(pos, items)
+	})
 	return nil
 }
 
@@ -836,34 +847,28 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 			container.NewPadded(a.inputBox),
 		),
 	)
-	chatBody := container.NewBorder(
-		nil,
-		container.NewVBox(lineWithColor(lineGray), composePanel),
-		nil,
-		nil,
+	chatBodySplit := container.NewVSplit(
 		container.NewMax(canvas.NewRectangle(rightGray), container.NewPadded(a.chatScroll)),
+		composePanel,
 	)
+	chatBodySplit.Offset = 0.78
 	a.chatPanel = container.NewBorder(
 		container.NewVBox(container.NewPadded(headerRow), lineWithColor(lineGray)),
 		nil,
 		nil,
 		nil,
-		chatBody,
+		chatBodySplit,
 	)
 	a.rightHost = container.NewMax(blankRightPanel())
 
-	leftBlock := container.NewHBox(
-		leftRail,
-		lineWithColor(lineGray),
-		middlePanel,
-		lineWithColor(lineGray),
-	)
+	mainSplit := container.NewHSplit(middlePanel, a.rightHost)
+	mainSplit.Offset = 0.33
 	root := container.NewBorder(
 		nil,
 		nil,
-		leftBlock,
+		container.NewBorder(nil, nil, nil, lineWithColor(lineGray), leftRail),
 		nil,
-		a.rightHost,
+		mainSplit,
 	)
 	return container.NewMax(canvas.NewRectangle(rightGray), root)
 }
@@ -1097,25 +1102,28 @@ func (a *appState) openPeerProfileDialog() {
 }
 
 func (a *appState) openEmojiPicker() {
+	if a.uiApp == nil {
+		return
+	}
 	emojis := []string{
 		"😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",
 		"🤔", "😴", "😭", "😡", "😱", "🥳", "🤝", "👍",
 		"👏", "🙏", "💯", "🔥", "❤️", "💙", "🎉", "🌟",
 	}
-	var dlg *dialog.CustomDialog
+	w := a.uiApp.NewWindow("表情")
+	w.SetIcon(resourceAppIcon)
+	w.Resize(fyne.NewSize(420, 220))
+	w.CenterOnScreen()
 	grid := container.NewGridWithColumns(8)
 	for _, e := range emojis {
 		emoji := e
 		grid.Add(newEmojiTile(emoji, func(string) {
 			a.insertToInput(emoji)
-			if dlg != nil {
-				dlg.Hide()
-			}
+			w.Close()
 		}))
 	}
-	dlg = dialog.NewCustom("选择表情", "关闭", container.NewPadded(grid), a.win)
-	dlg.Resize(fyne.NewSize(520, 260))
-	dlg.Show()
+	w.SetContent(container.NewPadded(grid))
+	w.Show()
 }
 
 func (a *appState) insertToInput(s string) {
@@ -1449,6 +1457,14 @@ func (a *appState) sendLocalStream(imageOnly bool) {
 	if !ok {
 		return
 	}
+	if runtime.GOOS == "windows" {
+		path, err := pickFilePathWindows(imageOnly)
+		if err != nil || path == "" {
+			return
+		}
+		a.sendLocalPath(peerKey, p, path, imageOnly)
+		return
+	}
 	cb := func(rc fyne.URIReadCloser, err error) {
 		if err != nil || rc == nil {
 			return
@@ -1458,34 +1474,7 @@ func (a *appState) sendLocalStream(imageOnly bool) {
 		if path == "" {
 			return
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			return
-		}
-		if info.Size() > maxFileBytes {
-			dialog.ShowInformation("提示", "文件超过 100GB", a.win)
-			return
-		}
-		name := sanitizeFilename(filepath.Base(path))
-		metaKind := "file_meta"
-		historyLabel := "[文件]"
-		if imageOnly {
-			if !isImagePath(path) {
-				dialog.ShowInformation("提示", "请选择图片文件", a.win)
-				return
-			}
-			metaKind = "image_meta"
-			historyLabel = "[图片]"
-		}
-		go func() {
-			if err := a.sendFileStream(peerKey, p, path, name, info.Size(), metaKind, historyLabel); err != nil {
-				a.appendHistory(peerKey, historyLine{Direction: "out", From: "我", Text: historyLabel + " 发送失败", SentAt: time.Now().Unix()})
-				a.refreshChatIfActive(peerKey)
-				a.pushStatus("发送失败")
-				return
-			}
-			a.pushStatus("发送完成")
-		}()
+		a.sendLocalPath(peerKey, p, path, imageOnly)
 	}
 	if imageOnly {
 		d := dialog.NewFileOpen(cb, a.win)
@@ -1494,6 +1483,37 @@ func (a *appState) sendLocalStream(imageOnly bool) {
 		return
 	}
 	dialog.ShowFileOpen(cb, a.win)
+}
+
+func (a *appState) sendLocalPath(peerKey string, p peer, path string, imageOnly bool) {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return
+	}
+	if info.Size() > maxFileBytes {
+		dialog.ShowInformation("提示", "文件超过 100GB", a.win)
+		return
+	}
+	name := sanitizeFilename(filepath.Base(path))
+	metaKind := "file_meta"
+	historyLabel := "[文件]"
+	if imageOnly {
+		if !isImagePath(path) {
+			dialog.ShowInformation("提示", "请选择图片文件", a.win)
+			return
+		}
+		metaKind = "image_meta"
+		historyLabel = "[图片]"
+	}
+	go func() {
+		if err := a.sendFileStream(peerKey, p, path, name, info.Size(), metaKind, historyLabel); err != nil {
+			a.appendHistory(peerKey, historyLine{Direction: "out", From: "我", Text: historyLabel + " 发送失败", SentAt: time.Now().Unix()})
+			a.refreshChatIfActive(peerKey)
+			a.pushStatus("发送失败")
+			return
+		}
+		a.pushStatus("发送完成")
+	}()
 }
 
 func (a *appState) sendFileStream(peerKey string, p peer, path, name string, size int64, metaKind string, historyPrefix string) error {
@@ -2178,6 +2198,43 @@ func (a *appState) safeUI(fn func()) {
 	fyne.Do(fn)
 }
 
+func (a *appState) handleDropOnInput(pos fyne.Position, items []fyne.URI) {
+	if len(items) == 0 || !a.dropInsideInput(pos) {
+		return
+	}
+	peerKey, p, ok := a.getActivePeer()
+	if !ok {
+		return
+	}
+	for _, u := range items {
+		path := uriLocalPath(u)
+		if path == "" || !isImagePath(path) {
+			continue
+		}
+		a.sendLocalPath(peerKey, p, path, true)
+	}
+}
+
+func (a *appState) dropInsideInput(pos fyne.Position) bool {
+	if a.inputBox == nil {
+		return false
+	}
+	if pointInsideRect(pos, a.inputBox.Position(), a.inputBox.Size()) {
+		return true
+	}
+	if app := fyne.CurrentApp(); app != nil && app.Driver() != nil {
+		abs := app.Driver().AbsolutePositionForObject(a.inputBox)
+		if pointInsideRect(pos, abs, a.inputBox.Size()) {
+			return true
+		}
+	}
+	return false
+}
+
+func pointInsideRect(p, origin fyne.Position, size fyne.Size) bool {
+	return p.X >= origin.X && p.Y >= origin.Y && p.X <= origin.X+size.Width && p.Y <= origin.Y+size.Height
+}
+
 func (a *appState) shutdown() {
 	a.stopOnce.Do(func() {
 		close(a.stopCh)
@@ -2514,6 +2571,31 @@ func splitPeerKey(key string) (string, string) {
 		return canonicalPeerID(parts[0]), ""
 	}
 	return "", ""
+}
+
+func pickFilePathWindows(imageOnly bool) (string, error) {
+	filter := "All files (*.*)|*.*"
+	if imageOnly {
+		filter = "Image files (*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp)|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|All files (*.*)|*.*"
+	}
+	script := fmt.Sprintf(`
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.OpenFileDialog
+$dlg.Multiselect = $false
+$dlg.CheckFileExists = $true
+$dlg.Filter = '%s'
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+	[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+	Write-Output $dlg.FileName
+}
+`, strings.ReplaceAll(filter, "'", "''"))
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func compactLine(s string, limit int) string {
