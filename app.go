@@ -30,6 +30,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"golang.org/x/crypto/curve25519"
@@ -45,6 +46,7 @@ const (
 	announceEvery          = 3 * time.Second
 	autoProbeEvery         = 10 * time.Second
 	scanBatchSize          = 220
+	probeParallelism       = 24
 	maxEnvelopeBytes       = 1 << 20
 	maxFrameBytes          = 20 << 20
 	fileChunkBytes         = 1 << 20
@@ -52,10 +54,12 @@ const (
 )
 
 type config struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	PublicKey  string `json:"publicKey"`
-	PrivateKey string `json:"privateKey"`
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Avatar     string            `json:"avatar,omitempty"`
+	Remarks    map[string]string `json:"remarks,omitempty"`
+	PublicKey  string            `json:"publicKey"`
+	PrivateKey string            `json:"privateKey"`
 }
 
 type peer struct {
@@ -67,6 +71,12 @@ type peer struct {
 	Port       int
 	PublicKey  string
 	LastSeen   time.Time
+}
+
+type peerRow struct {
+	Key      string
+	Title    string
+	Subtitle string
 }
 
 type discoveryPacket struct {
@@ -119,9 +129,9 @@ type oldQQTheme struct{}
 func (oldQQTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 56, G: 142, B: 255, A: 255}
+		return color.NRGBA{R: 53, G: 146, B: 255, A: 255}
 	case theme.ColorNameBackground:
-		return color.NRGBA{R: 245, G: 250, B: 255, A: 255}
+		return color.NRGBA{R: 244, G: 249, B: 255, A: 255}
 	case theme.ColorNameInputBackground:
 		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	default:
@@ -133,38 +143,39 @@ func (oldQQTheme) Icon(name fyne.ThemeIconName) fyne.Resource { return theme.Def
 func (oldQQTheme) Size(name fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(name) }
 
 type appState struct {
-	baseDir      string
-	dataDir      string
-	chatsDir     string
-	downloadsDir string
-	instanceID   string
-	listenPort   int
-	cfg          config
-
-	mu         sync.Mutex
-	peers      map[string]*peer
-	peerKeys   []string
-	peerTitles []string
-	peerFilter string
-	activeKey  string
-	scanOffset int
-
-	tcpListener net.Listener
-	udpConn     *net.UDPConn
-	stopOnce    sync.Once
-	stopCh      chan struct{}
-
-	uiApp        fyne.App
-	win          fyne.Window
-	contactBox   *widget.List
-	searchInput  *widget.Entry
-	nameInput    *widget.Entry
-	selfLabel    *widget.Label
-	chatLabel    *widget.Label
-	chatSubLabel *widget.Label
-	chatView     *widget.Entry
-	inputBox     *widget.Entry
-	statusBar    *widget.Label
+	baseDir       string
+	dataDir       string
+	chatsDir      string
+	downloadsDir  string
+	profileDir    string
+	instanceID    string
+	listenPort    int
+	cfg           config
+	mu            sync.Mutex
+	peers         map[string]*peer
+	peerRows      []peerRow
+	peerFilter    string
+	activeKey     string
+	scanOffset    int
+	tcpListener   net.Listener
+	udpConn       *net.UDPConn
+	stopOnce      sync.Once
+	stopCh        chan struct{}
+	uiApp         fyne.App
+	win           fyne.Window
+	tabs          *container.AppTabs
+	contactBox    *widget.List
+	searchInput   *widget.Entry
+	topInfo       *widget.Label
+	chatHeader    *widget.Label
+	chatSubHeader *widget.Label
+	chatView      *widget.Entry
+	inputBox      *widget.Entry
+	statusBar     *widget.Label
+	headerAvatar  *canvas.Image
+	nameInput     *widget.Entry
+	idInput       *widget.Entry
+	avatarPreview *canvas.Image
 }
 
 func newApp(baseDir string) *appState {
@@ -173,6 +184,7 @@ func newApp(baseDir string) *appState {
 		dataDir:      filepath.Join(baseDir, "data"),
 		chatsDir:     filepath.Join(baseDir, "data", "chats"),
 		downloadsDir: filepath.Join(baseDir, "data", "downloads"),
+		profileDir:   filepath.Join(baseDir, "data", "profile"),
 		instanceID:   randomID(4),
 		peers:        map[string]*peer{},
 		stopCh:       make(chan struct{}),
@@ -202,41 +214,46 @@ func (a *appState) run() error {
 	if err := a.startDiscovery(port); err != nil {
 		return err
 	}
-	a.pushStatus(fmt.Sprintf("已启动: TCP %d | 自动发现: 组播 + 广播 + 自动探测", port))
+	a.pushStatus("在线")
 	a.win.ShowAndRun()
 	a.shutdown()
 	return nil
 }
 
 func (a *appState) initStorage() error {
-	if err := os.MkdirAll(a.chatsDir, 0o755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(a.downloadsDir, 0o755); err != nil {
-		return err
+	for _, p := range []string{a.dataDir, a.chatsDir, a.downloadsDir, a.profileDir} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			return err
+		}
 	}
 	cfgPath := filepath.Join(a.dataDir, "config.json")
 	if b, err := os.ReadFile(cfgPath); err == nil {
 		if err := json.Unmarshal(b, &a.cfg); err != nil {
 			return err
 		}
-		if a.cfg.ID != "" && a.cfg.PrivateKey != "" && a.cfg.PublicKey != "" {
-			if strings.TrimSpace(a.cfg.Name) == "" {
-				a.cfg.Name = "LanUser"
-			}
-			return nil
-		}
 	}
 
-	host, _ := os.Hostname()
-	if strings.TrimSpace(host) == "" {
-		host = "LanUser"
+	if strings.TrimSpace(a.cfg.ID) == "" {
+		a.cfg.ID = newUserCode()
 	}
-	pub, priv, err := generateKeyPair()
-	if err != nil {
-		return err
+	if strings.TrimSpace(a.cfg.Name) == "" {
+		host, _ := os.Hostname()
+		if strings.TrimSpace(host) == "" {
+			host = "LanUser"
+		}
+		a.cfg.Name = host
 	}
-	a.cfg = config{ID: randomID(8), Name: host, PublicKey: pub, PrivateKey: priv}
+	if a.cfg.Remarks == nil {
+		a.cfg.Remarks = map[string]string{}
+	}
+	if a.cfg.PublicKey == "" || a.cfg.PrivateKey == "" {
+		pub, priv, err := generateKeyPair()
+		if err != nil {
+			return err
+		}
+		a.cfg.PublicKey = pub
+		a.cfg.PrivateKey = priv
+	}
 	return a.saveConfig()
 }
 
@@ -251,31 +268,25 @@ func (a *appState) saveConfig() error {
 func (a *appState) buildUI() error {
 	a.uiApp = app.NewWithID("lantalk")
 	a.uiApp.Settings().SetTheme(oldQQTheme{})
-	a.win = a.uiApp.NewWindow("LanTalk - 经典局域网聊天")
-	a.win.Resize(fyne.NewSize(1080, 720))
+	a.win = a.uiApp.NewWindow("LanTalk")
+	a.win.Resize(fyne.NewSize(1120, 740))
+	a.win.SetFixedSize(false)
 
-	a.selfLabel = widget.NewLabel(a.selfText())
-	a.selfLabel.TextStyle = fyne.TextStyle{Bold: true}
-
-	a.nameInput = widget.NewEntry()
-	a.nameInput.SetText(a.cfg.Name)
-	a.nameInput.SetPlaceHolder("输入昵称")
-	saveNameBtn := widget.NewButton("保存昵称", func() {
-		name := strings.TrimSpace(a.nameInput.Text)
-		if name == "" {
-			return
-		}
-		a.cfg.Name = name
-		if err := a.saveConfig(); err != nil {
-			dialog.ShowError(err, a.win)
-			return
-		}
-		a.selfLabel.SetText(a.selfText())
-		a.pushStatus("昵称已更新")
+	chatTab := container.NewTabItem("聊天", a.buildChatPage())
+	settingTab := container.NewTabItem("设置", a.buildSettingsPage())
+	a.tabs = container.NewAppTabs(chatTab, settingTab)
+	a.tabs.SetTabLocation(container.TabLocationTop)
+	a.win.SetContent(a.tabs)
+	a.win.SetCloseIntercept(func() {
+		a.shutdown()
+		a.win.Close()
 	})
+	return nil
+}
 
+func (a *appState) buildChatPage() fyne.CanvasObject {
 	a.searchInput = widget.NewEntry()
-	a.searchInput.SetPlaceHolder("搜索好友(昵称/IP)")
+	a.searchInput.SetPlaceHolder("搜索好友")
 	a.searchInput.OnChanged = func(v string) {
 		a.mu.Lock()
 		a.peerFilter = strings.TrimSpace(v)
@@ -287,28 +298,43 @@ func (a *appState) buildUI() error {
 		func() int {
 			a.mu.Lock()
 			defer a.mu.Unlock()
-			return len(a.peerKeys)
+			return len(a.peerRows)
 		},
 		func() fyne.CanvasObject {
-			lbl := widget.NewLabel("")
-			lbl.Wrapping = fyne.TextWrapWord
-			return lbl
+			icon := widget.NewIcon(theme.AccountIcon())
+			title := widget.NewLabel("")
+			title.TextStyle = fyne.TextStyle{Bold: true}
+			sub := widget.NewLabel("")
+			sub.Wrapping = fyne.TextWrapOff
+			return container.NewHBox(icon, container.NewVBox(title, sub))
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			a.mu.Lock()
-			text := ""
-			if id >= 0 && id < len(a.peerTitles) {
-				text = a.peerTitles[id]
+			row := peerRow{}
+			if id >= 0 && id < len(a.peerRows) {
+				row = a.peerRows[id]
 			}
 			a.mu.Unlock()
-			obj.(*widget.Label).SetText(text)
+			c := obj.(*fyne.Container)
+			textCol := c.Objects[1].(*fyne.Container)
+			textCol.Objects[0].(*widget.Label).SetText(row.Title)
+			textCol.Objects[1].(*widget.Label).SetText(row.Subtitle)
 		},
 	)
 	a.contactBox.OnSelected = func(id widget.ListItemID) { a.selectPeer(int(id)) }
 
-	a.chatLabel = widget.NewLabel("请选择左侧好友")
-	a.chatLabel.TextStyle = fyne.TextStyle{Bold: true}
-	a.chatSubLabel = widget.NewLabel("提示: 同机双开可互测；文件传输为分片端到端加密")
+	leftHeadTitle := widget.NewLabel("联系人")
+	leftHeadTitle.TextStyle = fyne.TextStyle{Bold: true}
+	leftPanel := container.NewVBox(leftHeadTitle, a.searchInput, a.contactBox)
+	leftCard := widget.NewCard("", "", leftPanel)
+	leftBg := canvas.NewRectangle(color.NRGBA{R: 233, G: 244, B: 255, A: 255})
+	left := container.NewMax(leftBg, container.NewPadded(leftCard))
+
+	a.headerAvatar = avatarImage(a.avatarAbsPath(), 52)
+	a.chatHeader = widget.NewLabel("请选择联系人")
+	a.chatHeader.TextStyle = fyne.TextStyle{Bold: true}
+	a.chatSubHeader = widget.NewLabel("")
+	remarkBtn := widget.NewButtonWithIcon("备注", theme.DocumentCreateIcon(), func() { a.openRemarkDialog() })
 
 	a.chatView = widget.NewMultiLineEntry()
 	a.chatView.Disable()
@@ -318,49 +344,253 @@ func (a *appState) buildUI() error {
 	a.inputBox = widget.NewMultiLineEntry()
 	a.inputBox.Wrapping = fyne.TextWrapWord
 	a.inputBox.SetMinRowsVisible(6)
-	a.inputBox.SetPlaceHolder("输入消息，回车换行")
 
-	refreshBtn := widget.NewButton("刷新发现", func() {
+	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
 		a.broadcastHello(a.listenPort)
 		go a.probeAutoTargets()
-		a.pushStatus("已触发主动发现")
 	})
-	fileBtn := widget.NewButton("发送文件", func() { a.sendCurrentFile() })
-	clearBtn := widget.NewButton("清空输入", func() { a.inputBox.SetText("") })
-	sendBtn := widget.NewButton("发送消息", func() { a.sendCurrentText() })
+	emojiBtn := widget.NewButtonWithIcon("表情", theme.ContentAddIcon(), func() { a.openEmojiPicker() })
+	imageBtn := widget.NewButtonWithIcon("图片", theme.FileImageIcon(), func() { a.sendCurrentImage() })
+	fileBtn := widget.NewButtonWithIcon("文件", theme.FileIcon(), func() { a.sendCurrentFile() })
+	clearBtn := widget.NewButtonWithIcon("", theme.ContentClearIcon(), func() { a.inputBox.SetText("") })
+	sendBtn := widget.NewButtonWithIcon("发送", theme.MailSendIcon(), func() { a.sendCurrentText() })
+	sendBtn.Importance = widget.HighImportance
+	a.statusBar = widget.NewLabel("")
 
-	a.statusBar = widget.NewLabel("准备就绪")
-
-	headerBg := canvas.NewRectangle(color.NRGBA{R: 56, G: 142, B: 255, A: 255})
-	headerTitle := widget.NewLabel("LanTalk")
-	headerTitle.TextStyle = fyne.TextStyle{Bold: true}
-	header := container.NewMax(headerBg, container.NewPadded(container.NewVBox(headerTitle, a.selfLabel)))
-
-	profileCard := widget.NewCard("账号", "本地身份信息", container.NewVBox(a.nameInput, saveNameBtn))
-	discoveryCard := widget.NewCard("自动发现", "组播 + 广播 + 自动端口探测（无需手动添加）", container.NewVBox(a.searchInput, a.contactBox))
-	leftPane := container.NewVBox(header, profileCard, discoveryCard)
-	leftBg := canvas.NewRectangle(color.NRGBA{R: 232, G: 243, B: 255, A: 255})
-	left := container.NewMax(leftBg, container.NewPadded(leftPane))
-
+	headerRow := container.NewHBox(
+		a.headerAvatar,
+		container.NewVBox(a.chatHeader, a.chatSubHeader),
+		layout.NewSpacer(),
+		remarkBtn,
+	)
 	chatSplit := container.NewVSplit(a.chatView, a.inputBox)
 	chatSplit.Offset = 0.78
-	actions := container.NewHBox(refreshBtn, fileBtn, clearBtn, layout.NewSpacer(), sendBtn)
-	headerRight := container.NewVBox(a.chatLabel, a.chatSubLabel)
-	rightBody := container.NewBorder(headerRight, container.NewVBox(actions, a.statusBar), nil, nil, chatSplit)
-	right := container.NewPadded(rightBody)
+	actions := container.NewHBox(refreshBtn, emojiBtn, imageBtn, fileBtn, clearBtn, layout.NewSpacer(), sendBtn)
+	rightCard := widget.NewCard("", "", container.NewBorder(headerRow, container.NewVBox(actions, a.statusBar), nil, nil, chatSplit))
+	right := container.NewPadded(rightCard)
 
-	hSplit := container.NewHSplit(left, right)
-	hSplit.Offset = 0.34
-	a.win.SetContent(hSplit)
-	a.win.SetCloseIntercept(func() {
-		a.shutdown()
-		a.win.Close()
+	split := container.NewHSplit(left, right)
+	split.Offset = 0.32
+
+	title := widget.NewLabel("LanTalk")
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	a.topInfo = widget.NewLabel(fmt.Sprintf("%s  ·  %s", a.cfg.Name, shortID(a.cfg.ID)))
+	settingBtn := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
+		if a.tabs != nil {
+			a.tabs.SelectIndex(1)
+		}
 	})
-	return nil
+	topBar := container.NewMax(
+		canvas.NewRectangle(color.NRGBA{R: 53, G: 146, B: 255, A: 255}),
+		container.NewPadded(container.NewHBox(title, layout.NewSpacer(), a.topInfo, settingBtn)),
+	)
+
+	return container.NewBorder(topBar, nil, nil, nil, split)
 }
 
-func (a *appState) selfText() string {
-	return fmt.Sprintf("昵称: %s | ID: %s | 实例: %s", a.cfg.Name, shortID(a.cfg.ID), shortID(a.instanceID))
+func (a *appState) buildSettingsPage() fyne.CanvasObject {
+	a.avatarPreview = avatarImage(a.avatarAbsPath(), 132)
+
+	a.nameInput = widget.NewEntry()
+	a.nameInput.SetText(a.cfg.Name)
+	a.idInput = widget.NewEntry()
+	a.idInput.SetText(a.cfg.ID)
+
+	pickAvatarBtn := widget.NewButton("选择头像", func() {
+		dialog.ShowFileOpen(func(rc fyne.URIReadCloser, err error) {
+			if err != nil || rc == nil {
+				return
+			}
+			path := uriLocalPath(rc.URI())
+			_ = rc.Close()
+			if path == "" {
+				return
+			}
+			a.applyAvatar(path)
+		}, a.win)
+	})
+	clearAvatarBtn := widget.NewButton("移除头像", func() {
+		a.cfg.Avatar = ""
+		_ = a.saveConfig()
+		a.refreshAvatarViews()
+	})
+
+	copyIDBtn := widget.NewButton("复制识别码", func() {
+		a.win.Clipboard().SetContent(strings.TrimSpace(a.idInput.Text))
+		a.pushStatus("已复制")
+	})
+
+	saveBtn := widget.NewButton("保存设置", func() {
+		name := strings.TrimSpace(a.nameInput.Text)
+		if name == "" {
+			name = "LanUser"
+		}
+		uid := normalizeUserCode(a.idInput.Text)
+		if uid == "" {
+			dialog.ShowInformation("提示", "识别码格式不正确", a.win)
+			return
+		}
+		a.cfg.Name = name
+		a.cfg.ID = uid
+		a.idInput.SetText(uid)
+		if err := a.saveConfig(); err != nil {
+			dialog.ShowError(err, a.win)
+			return
+		}
+		a.refreshContacts()
+		a.refreshAvatarViews()
+		if a.topInfo != nil {
+			a.topInfo.SetText(fmt.Sprintf("%s  ·  %s", a.cfg.Name, shortID(a.cfg.ID)))
+		}
+		a.pushStatus("已保存")
+	})
+
+	avatarRow := container.NewHBox(
+		a.avatarPreview,
+		container.NewVBox(pickAvatarBtn, clearAvatarBtn),
+	)
+	infoForm := widget.NewForm(
+		widget.NewFormItem("昵称", a.nameInput),
+		widget.NewFormItem("识别码", a.idInput),
+	)
+	selfCard := widget.NewCard("个人资料", "", container.NewVBox(avatarRow, infoForm, container.NewHBox(copyIDBtn, layout.NewSpacer(), saveBtn)))
+
+	return container.NewPadded(container.NewVBox(selfCard))
+}
+
+func (a *appState) applyAvatar(srcPath string) {
+	ext := strings.ToLower(filepath.Ext(srcPath))
+	if ext == "" {
+		ext = ".png"
+	}
+	dst := filepath.Join(a.profileDir, "avatar"+ext)
+	if err := copyFile(srcPath, dst); err != nil {
+		dialog.ShowError(err, a.win)
+		return
+	}
+	a.cfg.Avatar = filepath.ToSlash(filepath.Join("data", "profile", filepath.Base(dst)))
+	_ = a.saveConfig()
+	a.refreshAvatarViews()
+}
+
+func (a *appState) avatarAbsPath() string {
+	if strings.TrimSpace(a.cfg.Avatar) == "" {
+		return ""
+	}
+	p := a.cfg.Avatar
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(a.baseDir, filepath.FromSlash(p))
+}
+
+func (a *appState) refreshAvatarViews() {
+	path := a.avatarAbsPath()
+	a.safeUI(func() {
+		if a.avatarPreview != nil {
+			setAvatarImage(a.avatarPreview, path)
+		}
+		if a.headerAvatar != nil {
+			setAvatarImage(a.headerAvatar, path)
+		}
+		if a.chatHeader != nil {
+			a.chatHeader.SetText("请选择联系人")
+		}
+	})
+}
+
+func (a *appState) openRemarkDialog() {
+	key, p, ok := a.getActivePeer()
+	if !ok {
+		return
+	}
+	entry := widget.NewEntry()
+	entry.SetText(a.getRemark(p.ID))
+	content := container.NewVBox(widget.NewLabel("好友备注"), entry)
+	dlg := dialog.NewCustomConfirm("设置备注", "保存", "取消", content, func(confirm bool) {
+		if !confirm {
+			return
+		}
+		a.setRemark(p.ID, entry.Text)
+		a.refreshContacts()
+		a.refreshHeaderByKey(key)
+	}, a.win)
+	dlg.Resize(fyne.NewSize(360, 160))
+	dlg.Show()
+}
+
+func (a *appState) openEmojiPicker() {
+	emojis := []string{
+		"😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",
+		"🤔", "😴", "😭", "😡", "😱", "🥳", "🤝", "👍",
+		"👏", "🙏", "💯", "🔥", "❤️", "💙", "🎉", "🌟",
+	}
+	grid := container.NewGridWithColumns(6)
+	for _, e := range emojis {
+		emoji := e
+		btn := widget.NewButton(emoji, func() {
+			a.insertToInput(emoji)
+		})
+		grid.Add(btn)
+	}
+	dlg := dialog.NewCustom("选择表情", "关闭", container.NewPadded(grid), a.win)
+	dlg.Resize(fyne.NewSize(420, 260))
+	dlg.Show()
+}
+
+func (a *appState) insertToInput(s string) {
+	if a.inputBox == nil {
+		return
+	}
+	a.inputBox.SetText(a.inputBox.Text + s)
+}
+
+func (a *appState) getRemark(userID string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return strings.TrimSpace(a.cfg.Remarks[userID])
+}
+
+func (a *appState) setRemark(userID, remark string) {
+	a.mu.Lock()
+	if a.cfg.Remarks == nil {
+		a.cfg.Remarks = map[string]string{}
+	}
+	remark = strings.TrimSpace(remark)
+	if remark == "" {
+		delete(a.cfg.Remarks, userID)
+	} else {
+		a.cfg.Remarks[userID] = remark
+	}
+	a.mu.Unlock()
+	_ = a.saveConfig()
+}
+
+func (a *appState) displayNameForPeer(p *peer) string {
+	if p == nil {
+		return ""
+	}
+	remark := a.getRemark(p.ID)
+	if remark != "" {
+		return remark
+	}
+	if strings.TrimSpace(p.Name) != "" {
+		return p.Name
+	}
+	return p.ID
+}
+
+func (a *appState) refreshHeaderByKey(key string) {
+	a.mu.Lock()
+	p := a.peers[key]
+	a.mu.Unlock()
+	if p == nil {
+		return
+	}
+	a.safeUI(func() {
+		a.chatHeader.SetText(a.displayNameForPeer(p))
+		a.chatSubHeader.SetText(fmt.Sprintf("%s:%d · %s", p.Addr, p.Port, shortID(p.ID)))
+	})
 }
 
 func (a *appState) startTCPServer() (int, error) {
@@ -406,25 +636,9 @@ func (a *appState) handleTCPConn(conn net.Conn) {
 
 func (a *appState) handleProbe(conn net.Conn, host string, env chatEnvelope) {
 	if env.FromID != "" && env.FromPubKey != "" && env.FromInstance != a.instanceID {
-		a.upsertPeer(peer{
-			Key:        makePeerKey(env.FromID, env.FromInstance),
-			ID:         env.FromID,
-			InstanceID: env.FromInstance,
-			Name:       env.FromName,
-			Addr:       host,
-			Port:       env.Port,
-			PublicKey:  env.FromPubKey,
-			LastSeen:   time.Now(),
-		})
+		a.upsertPeer(peer{Key: makePeerKey(env.FromID, env.FromInstance), ID: env.FromID, InstanceID: env.FromInstance, Name: env.FromName, Addr: host, Port: env.Port, PublicKey: env.FromPubKey, LastSeen: time.Now()})
 	}
-	ack := chatEnvelope{
-		Type:         "probe_ack",
-		FromID:       a.cfg.ID,
-		FromInstance: a.instanceID,
-		FromName:     a.cfg.Name,
-		FromPubKey:   a.cfg.PublicKey,
-		Port:         a.listenPort,
-	}
+	ack := chatEnvelope{Type: "probe_ack", FromID: a.cfg.ID, FromInstance: a.instanceID, FromName: a.cfg.Name, FromPubKey: a.cfg.PublicKey, Port: a.listenPort}
 	_ = writeEnvelope(conn, ack)
 }
 
@@ -433,16 +647,7 @@ func (a *appState) handleChat(host string, env chatEnvelope) {
 		return
 	}
 	peerKey := makePeerKey(env.FromID, env.FromInstance)
-	a.upsertPeer(peer{
-		Key:        peerKey,
-		ID:         env.FromID,
-		InstanceID: env.FromInstance,
-		Name:       env.FromName,
-		Addr:       host,
-		Port:       env.Port,
-		PublicKey:  env.FromPubKey,
-		LastSeen:   time.Now(),
-	})
+	a.upsertPeer(peer{Key: peerKey, ID: env.FromID, InstanceID: env.FromInstance, Name: env.FromName, Addr: host, Port: env.Port, PublicKey: env.FromPubKey, LastSeen: time.Now()})
 
 	payload, err := decrypt(env.FromPubKey, a.cfg.PrivateKey, env.Payload)
 	if err != nil {
@@ -457,8 +662,7 @@ func (a *appState) handleChat(host string, env chatEnvelope) {
 	if strings.TrimSpace(payload.Text) == "" {
 		return
 	}
-
-	line := historyLine{Direction: "in", From: env.FromName, Text: payload.Text, SentAt: payload.SentAt}
+	line := historyLine{Direction: "in", From: a.displayNameForPeer(&peer{ID: env.FromID, Name: env.FromName}), Text: payload.Text, SentAt: payload.SentAt}
 	a.appendHistory(peerKey, line)
 	a.refreshChatIfActive(peerKey)
 }
@@ -468,22 +672,13 @@ func (a *appState) handleFileStream(reader *bufio.Reader, host string, env chatE
 		return
 	}
 	peerKey := makePeerKey(env.FromID, env.FromInstance)
-	a.upsertPeer(peer{
-		Key:        peerKey,
-		ID:         env.FromID,
-		InstanceID: env.FromInstance,
-		Name:       env.FromName,
-		Addr:       host,
-		Port:       env.Port,
-		PublicKey:  env.FromPubKey,
-		LastSeen:   time.Now(),
-	})
+	a.upsertPeer(peer{Key: peerKey, ID: env.FromID, InstanceID: env.FromInstance, Name: env.FromName, Addr: host, Port: env.Port, PublicKey: env.FromPubKey, LastSeen: time.Now()})
 
 	meta, err := decrypt(env.FromPubKey, a.cfg.PrivateKey, env.Payload)
 	if err != nil {
 		return
 	}
-	if meta.Kind != "file_meta" || meta.FileName == "" || meta.FileSize < 0 || meta.FileSize > maxFileBytes {
+	if (meta.Kind != "file_meta" && meta.Kind != "image_meta") || meta.FileName == "" || meta.FileSize < 0 || meta.FileSize > maxFileBytes {
 		return
 	}
 	chunkSize := meta.ChunkSize
@@ -512,7 +707,14 @@ func (a *appState) handleFileStream(reader *bufio.Reader, host string, env chatE
 	if name == "" {
 		name = "received.bin"
 	}
-	finalPath := uniqueFilePath(a.downloadsDir, name)
+	saveDir := a.downloadsDir
+	label := "[文件]"
+	if meta.Kind == "image_meta" {
+		saveDir = filepath.Join(a.downloadsDir, "images")
+		_ = os.MkdirAll(saveDir, 0o755)
+		label = "[图片]"
+	}
+	finalPath := uniqueFilePath(saveDir, name)
 	partPath := finalPath + ".part"
 	out, err := os.Create(partPath)
 	if err != nil {
@@ -530,8 +732,7 @@ func (a *appState) handleFileStream(reader *bufio.Reader, host string, env chatE
 		if clen == 0 {
 			break
 		}
-		maxChunkCipher := uint32(chunkSize + gcm.Overhead() + 64)
-		if clen > maxChunkCipher {
+		if clen > uint32(chunkSize+gcm.Overhead()+64) {
 			_ = os.Remove(partPath)
 			return
 		}
@@ -568,9 +769,9 @@ func (a *appState) handleFileStream(reader *bufio.Reader, host string, env chatE
 		return
 	}
 	rel, _ := filepath.Rel(a.baseDir, finalPath)
-	msg := fmt.Sprintf("[文件] %s 已接收 (%s) -> %s", name, humanSize(received), rel)
-	line := historyLine{Direction: "in", From: env.FromName, Text: msg, SentAt: meta.SentAt}
-	a.appendHistory(peerKey, line)
+	displayFrom := a.displayNameForPeer(&peer{ID: env.FromID, Name: env.FromName})
+	msg := fmt.Sprintf("%s %s (%s) -> %s", label, name, humanSize(received), rel)
+	a.appendHistory(peerKey, historyLine{Direction: "in", From: displayFrom, Text: msg, SentAt: meta.SentAt})
 	a.refreshChatIfActive(peerKey)
 }
 
@@ -581,63 +782,77 @@ func (a *appState) sendCurrentText() {
 	}
 	peerKey, p, ok := a.getActivePeer()
 	if !ok {
-		a.pushStatus("请先选择在线好友")
 		return
 	}
 	payload := plainPayload{ID: randomID(8), Kind: "text", Text: text, SentAt: time.Now().Unix()}
 	if err := a.sendPayload(peerKey, p, payload, text); err != nil {
-		a.pushStatus("发送失败: " + err.Error())
+		a.pushStatus("发送失败")
 		return
 	}
 	a.inputBox.SetText("")
 }
 
 func (a *appState) sendCurrentFile() {
+	a.sendLocalStream(false)
+}
+
+func (a *appState) sendCurrentImage() {
+	a.sendLocalStream(true)
+}
+
+func (a *appState) sendLocalStream(imageOnly bool) {
 	peerKey, p, ok := a.getActivePeer()
 	if !ok {
-		a.pushStatus("请先选择在线好友")
 		return
 	}
-	dialog.ShowFileOpen(func(rc fyne.URIReadCloser, err error) {
-		if err != nil {
-			a.pushStatus("打开文件失败")
+	cb := func(rc fyne.URIReadCloser, err error) {
+		if err != nil || rc == nil {
 			return
 		}
-		if rc == nil {
-			return
-		}
-		uri := rc.URI()
+		path := uriLocalPath(rc.URI())
 		_ = rc.Close()
-		path := uriLocalPath(uri)
 		if path == "" {
-			a.pushStatus("无法解析文件路径")
 			return
 		}
 		info, err := os.Stat(path)
 		if err != nil {
-			a.pushStatus("读取文件属性失败")
 			return
 		}
 		if info.Size() > maxFileBytes {
-			a.pushStatus("文件过大，单文件最大 100GB")
+			dialog.ShowInformation("提示", "文件超过 100GB", a.win)
 			return
 		}
 		name := sanitizeFilename(filepath.Base(path))
-		go func() {
-			a.pushStatus(fmt.Sprintf("开始发送文件: %s (%s)", name, humanSize(info.Size())))
-			if err := a.sendFileStream(peerKey, p, path, name, info.Size()); err != nil {
-				fail := fmt.Sprintf("[文件] %s 发送失败: %s", name, err.Error())
-				a.appendHistory(peerKey, historyLine{Direction: "out", From: a.cfg.Name, Text: fail, SentAt: time.Now().Unix()})
-				a.refreshChatIfActive(peerKey)
-				a.pushStatus("发送文件失败: " + err.Error())
+		metaKind := "file_meta"
+		historyLabel := "[文件]"
+		if imageOnly {
+			if !isImagePath(path) {
+				dialog.ShowInformation("提示", "请选择图片文件", a.win)
 				return
 			}
-			a.pushStatus("文件发送完成")
+			metaKind = "image_meta"
+			historyLabel = "[图片]"
+		}
+		go func() {
+			if err := a.sendFileStream(peerKey, p, path, name, info.Size(), metaKind, historyLabel); err != nil {
+				a.appendHistory(peerKey, historyLine{Direction: "out", From: "我", Text: historyLabel + " 发送失败", SentAt: time.Now().Unix()})
+				a.refreshChatIfActive(peerKey)
+				a.pushStatus("发送失败")
+				return
+			}
+			a.pushStatus("发送完成")
 		}()
-	}, a.win)
+	}
+	if imageOnly {
+		d := dialog.NewFileOpen(cb, a.win)
+		d.SetFilter(storage.NewExtensionFileFilter([]string{".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}))
+		d.Show()
+		return
+	}
+	dialog.ShowFileOpen(cb, a.win)
 }
 
-func (a *appState) sendFileStream(peerKey string, p peer, path, name string, size int64) error {
+func (a *appState) sendFileStream(peerKey string, p peer, path, name string, size int64, metaKind string, historyPrefix string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -661,36 +876,18 @@ func (a *appState) sendFileStream(peerKey string, p peer, path, name string, siz
 		return err
 	}
 
-	meta := plainPayload{
-		ID:         randomID(8),
-		Kind:       "file_meta",
-		FileName:   name,
-		FileSize:   size,
-		ChunkSize:  fileChunkBytes,
-		TransferID: randomID(8),
-		Salt:       base64.StdEncoding.EncodeToString(salt),
-		SentAt:     time.Now().Unix(),
-	}
+	meta := plainPayload{ID: randomID(8), Kind: metaKind, FileName: name, FileSize: size, ChunkSize: fileChunkBytes, TransferID: randomID(8), Salt: base64.StdEncoding.EncodeToString(salt), SentAt: time.Now().Unix()}
 	metaEnc, err := encrypt(p.PublicKey, a.cfg.PrivateKey, meta)
 	if err != nil {
 		return err
 	}
-	env := chatEnvelope{
-		Type:         "file_stream",
-		FromID:       a.cfg.ID,
-		FromInstance: a.instanceID,
-		FromName:     a.cfg.Name,
-		FromPubKey:   a.cfg.PublicKey,
-		Port:         a.listenPort,
-		Payload:      metaEnc,
-	}
+	env := chatEnvelope{Type: "file_stream", FromID: a.cfg.ID, FromInstance: a.instanceID, FromName: a.cfg.Name, FromPubKey: a.cfg.PublicKey, Port: a.listenPort, Payload: metaEnc}
 
 	conn, err := net.DialTimeout("tcp4", fmt.Sprintf("%s:%d", p.Addr, p.Port), 4*time.Second)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Time{})
 	bw := bufio.NewWriterSize(conn, 128*1024)
 	if err := writeEnvelope(bw, env); err != nil {
 		return err
@@ -722,8 +919,8 @@ func (a *appState) sendFileStream(peerKey string, p peer, path, name string, siz
 		return err
 	}
 
-	history := fmt.Sprintf("[文件] %s (%s) 已发送", name, humanSize(size))
-	a.appendHistory(peerKey, historyLine{Direction: "out", From: a.cfg.Name, Text: history, SentAt: meta.SentAt})
+	history := fmt.Sprintf("%s %s (%s)", historyPrefix, name, humanSize(size))
+	a.appendHistory(peerKey, historyLine{Direction: "out", From: "我", Text: history, SentAt: meta.SentAt})
 	a.refreshChatIfActive(peerKey)
 	return nil
 }
@@ -733,22 +930,12 @@ func (a *appState) sendPayload(peerKey string, p peer, payload plainPayload, his
 	if err != nil {
 		return err
 	}
-	env := chatEnvelope{
-		Type:         "chat",
-		FromID:       a.cfg.ID,
-		FromInstance: a.instanceID,
-		FromName:     a.cfg.Name,
-		FromPubKey:   a.cfg.PublicKey,
-		Port:         a.listenPort,
-		Payload:      payloadEnc,
-	}
+	env := chatEnvelope{Type: "chat", FromID: a.cfg.ID, FromInstance: a.instanceID, FromName: a.cfg.Name, FromPubKey: a.cfg.PublicKey, Port: a.listenPort, Payload: payloadEnc}
 	if err := sendEnvelope(p, env); err != nil {
 		return err
 	}
-	line := historyLine{Direction: "out", From: a.cfg.Name, Text: historyText, SentAt: payload.SentAt}
-	a.appendHistory(peerKey, line)
+	a.appendHistory(peerKey, historyLine{Direction: "out", From: "我", Text: historyText, SentAt: payload.SentAt})
 	a.refreshChatIfActive(peerKey)
-	a.pushStatus("已发送")
 	return nil
 }
 
@@ -784,16 +971,7 @@ func (a *appState) startDiscovery(chatPort int) error {
 			if p.Type != "hello" || p.ID == "" || p.PublicKey == "" || p.InstanceID == a.instanceID {
 				continue
 			}
-			a.upsertPeer(peer{
-				Key:        makePeerKey(p.ID, p.InstanceID),
-				ID:         p.ID,
-				InstanceID: p.InstanceID,
-				Name:       p.Name,
-				Addr:       addr.IP.String(),
-				Port:       p.Port,
-				PublicKey:  p.PublicKey,
-				LastSeen:   time.Now(),
-			})
+			a.upsertPeer(peer{Key: makePeerKey(p.ID, p.InstanceID), ID: p.ID, InstanceID: p.InstanceID, Name: p.Name, Addr: addr.IP.String(), Port: p.Port, PublicKey: p.PublicKey, LastSeen: time.Now()})
 		}
 	}()
 
@@ -875,7 +1053,7 @@ func (a *appState) broadcastHello(chatPort int) {
 
 func (a *appState) probeAutoTargets() {
 	targets := a.collectAutoProbeTargets()
-	sem := make(chan struct{}, 24)
+	sem := make(chan struct{}, probeParallelism)
 	var wg sync.WaitGroup
 	for _, t := range targets {
 		wg.Add(1)
@@ -891,7 +1069,6 @@ func (a *appState) probeAutoTargets() {
 
 func (a *appState) collectAutoProbeTargets() []string {
 	set := map[string]struct{}{}
-
 	a.mu.Lock()
 	for _, p := range a.peers {
 		if p.Addr == "" {
@@ -957,15 +1134,13 @@ func (a *appState) probeTarget(target string) error {
 	if err := writeEnvelope(conn, probe); err != nil {
 		return err
 	}
-	reader := bufio.NewReader(conn)
-	ack, err := readEnvelope(reader)
+	ack, err := readEnvelope(bufio.NewReader(conn))
 	if err != nil {
 		return err
 	}
 	if ack.Type != "probe_ack" || ack.FromID == "" || ack.FromPubKey == "" || ack.FromInstance == a.instanceID {
 		return errors.New("invalid ack")
 	}
-
 	host, _, _ := net.SplitHostPort(target)
 	a.upsertPeer(peer{Key: makePeerKey(ack.FromID, ack.FromInstance), ID: ack.FromID, InstanceID: ack.FromInstance, Name: ack.FromName, Addr: host, Port: ack.Port, PublicKey: ack.FromPubKey, LastSeen: time.Now()})
 	return nil
@@ -988,8 +1163,8 @@ func (a *appState) upsertPeer(in peer) {
 		return
 	}
 	if exist == nil {
-		copyPeer := in
-		a.peers[in.Key] = &copyPeer
+		cp := in
+		a.peers[in.Key] = &cp
 	} else {
 		exist.Name = in.Name
 		if in.Addr != "" {
@@ -1014,42 +1189,38 @@ func (a *appState) refreshContacts() {
 	a.mu.Unlock()
 
 	sort.Slice(pairs, func(i, j int) bool {
-		if strings.ToLower(pairs[i].Name) == strings.ToLower(pairs[j].Name) {
+		di := strings.ToLower(a.displayNameForPeer(pairs[i]))
+		dj := strings.ToLower(a.displayNameForPeer(pairs[j]))
+		if di == dj {
 			return pairs[i].Addr < pairs[j].Addr
 		}
-		return strings.ToLower(pairs[i].Name) < strings.ToLower(pairs[j].Name)
+		return di < dj
 	})
 
-	keys := make([]string, 0, len(pairs))
-	titles := make([]string, 0, len(pairs))
+	rows := make([]peerRow, 0, len(pairs))
 	for _, p := range pairs {
-		show := strings.ToLower(p.Name + " " + p.Addr + " " + p.ID)
-		if filter != "" && !strings.Contains(show, filter) {
+		title := a.displayNameForPeer(p)
+		sub := fmt.Sprintf("%s:%d · %s", p.Addr, p.Port, shortID(p.ID))
+		probe := strings.ToLower(title + " " + sub)
+		if filter != "" && !strings.Contains(probe, filter) {
 			continue
 		}
-		display := p.Name
-		if p.ID == a.cfg.ID {
-			display += " [本机实例]"
-		}
-		titles = append(titles, fmt.Sprintf("%s\n%s:%d  #%s", display, p.Addr, p.Port, shortID(p.InstanceID)))
-		keys = append(keys, p.Key)
+		rows = append(rows, peerRow{Key: p.Key, Title: title, Subtitle: sub})
 	}
 
 	a.mu.Lock()
-	a.peerKeys = keys
-	a.peerTitles = titles
+	a.peerRows = rows
 	a.mu.Unlock()
-
 	a.safeUI(func() { a.contactBox.Refresh() })
 }
 
 func (a *appState) selectPeer(index int) {
 	a.mu.Lock()
-	if index < 0 || index >= len(a.peerKeys) {
+	if index < 0 || index >= len(a.peerRows) {
 		a.mu.Unlock()
 		return
 	}
-	key := a.peerKeys[index]
+	key := a.peerRows[index].Key
 	p := a.peers[key]
 	a.activeKey = key
 	a.mu.Unlock()
@@ -1057,8 +1228,8 @@ func (a *appState) selectPeer(index int) {
 		return
 	}
 	a.safeUI(func() {
-		a.chatLabel.SetText("正在与 " + p.Name + " 对话")
-		a.chatSubLabel.SetText(fmt.Sprintf("地址: %s:%d | 实例: %s", p.Addr, p.Port, shortID(p.InstanceID)))
+		a.chatHeader.SetText(a.displayNameForPeer(p))
+		a.chatSubHeader.SetText(fmt.Sprintf("%s:%d · %s", p.Addr, p.Port, shortID(p.ID)))
 	})
 	a.renderHistory(key)
 }
@@ -1137,7 +1308,9 @@ func (a *appState) historyPath(peerKey string) string {
 	return filepath.Join(a.chatsDir, sanitizeFilename(peerKey)+".json")
 }
 
-func (a *appState) pushStatus(text string) { a.safeUI(func() { a.statusBar.SetText(text) }) }
+func (a *appState) pushStatus(text string) {
+	a.safeUI(func() { a.statusBar.SetText(text) })
+}
 
 func (a *appState) safeUI(fn func()) {
 	if a.uiApp == nil {
@@ -1160,7 +1333,7 @@ func (a *appState) shutdown() {
 
 func sendEnvelope(p peer, env chatEnvelope) error {
 	if p.Port == 0 || p.Addr == "" {
-		return errors.New("好友地址不可用")
+		return errors.New("unreachable")
 	}
 	conn, err := net.DialTimeout("tcp4", fmt.Sprintf("%s:%d", p.Addr, p.Port), 2*time.Second)
 	if err != nil {
@@ -1301,6 +1474,69 @@ func deriveKey(privB64, pubB64 string, salt []byte) ([]byte, error) {
 	return key, nil
 }
 
+func avatarImage(path string, size float32) *canvas.Image {
+	img := canvas.NewImageFromResource(theme.AccountIcon())
+	img.FillMode = canvas.ImageFillContain
+	img.SetMinSize(fyne.NewSize(size, size))
+	setAvatarImage(img, path)
+	return img
+}
+
+func setAvatarImage(img *canvas.Image, path string) {
+	if img == nil {
+		return
+	}
+	if path != "" {
+		if _, err := os.Stat(path); err == nil {
+			img.File = path
+			img.Resource = nil
+			img.Refresh()
+			return
+		}
+	}
+	img.File = ""
+	img.Resource = theme.AccountIcon()
+	img.Refresh()
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
+func newUserCode() string {
+	return strings.ToUpper(randomID(6))
+}
+
+func normalizeUserCode(s string) string {
+	s = strings.ToUpper(strings.TrimSpace(s))
+	if len(s) < 6 || len(s) > 32 {
+		return ""
+	}
+	for _, r := range s {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return ""
+	}
+	return s
+}
+
 func randomID(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
@@ -1358,6 +1594,16 @@ func sanitizeFilename(s string) string {
 		return "file"
 	}
 	return out
+}
+
+func isImagePath(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp":
+		return true
+	default:
+		return false
+	}
 }
 
 func uniqueFilePath(dir, name string) string {
