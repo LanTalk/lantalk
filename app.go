@@ -141,39 +141,37 @@ func (oldQQTheme) Icon(name fyne.ThemeIconName) fyne.Resource { return theme.Def
 func (oldQQTheme) Size(name fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(name) }
 
 type appState struct {
-	baseDir       string
-	dataDir       string
-	chatsDir      string
-	downloadsDir  string
-	profileDir    string
-	instanceID    string
-	listenPort    int
-	cfg           config
-	mu            sync.Mutex
-	peers         map[string]*peer
-	peerRows      []peerRow
-	peerFilter    string
-	activeKey     string
-	scanOffset    int
-	tcpListener   net.Listener
-	udpConn       *net.UDPConn
-	stopOnce      sync.Once
-	stopCh        chan struct{}
-	uiApp         fyne.App
-	win           fyne.Window
-	tabs          *container.AppTabs
-	contactBox    *widget.List
-	searchInput   *widget.Entry
-	topInfo       *widget.Label
-	chatHeader    *widget.Label
-	chatSubHeader *widget.Label
-	chatView      *widget.Entry
-	inputBox      *widget.Entry
-	statusBar     *widget.Label
-	headerAvatar  *canvas.Image
-	nameInput     *widget.Entry
-	idInput       *widget.Entry
-	avatarPreview *canvas.Image
+	baseDir        string
+	dataDir        string
+	chatsDir       string
+	downloadsDir   string
+	profileDir     string
+	instanceID     string
+	listenPort     int
+	cfg            config
+	mu             sync.Mutex
+	peers          map[string]*peer
+	peerRows       []peerRow
+	peerFilter     string
+	activeKey      string
+	scanOffset     int
+	tcpListener    net.Listener
+	udpConn        *net.UDPConn
+	stopOnce       sync.Once
+	stopCh         chan struct{}
+	uiApp          fyne.App
+	win            fyne.Window
+	settingsWin    fyne.Window
+	contactBox     *widget.List
+	searchInput    *widget.Entry
+	topInfo        *widget.Label
+	chatHeader     *widget.Label
+	chatSubHeader  *widget.Label
+	chatView       *widget.Entry
+	inputBox       *widget.Entry
+	statusBar      *widget.Label
+	headerAvatar   *canvas.Image
+	settingsAvatar *canvas.Image
 }
 
 func newApp(baseDir string) *appState {
@@ -265,16 +263,13 @@ func (a *appState) saveConfig() error {
 
 func (a *appState) buildUI() error {
 	a.uiApp = app.NewWithID("lantalk")
+	a.uiApp.SetIcon(resourceAppIcon)
 	a.uiApp.Settings().SetTheme(oldQQTheme{})
 	a.win = a.uiApp.NewWindow("LanTalk")
+	a.win.SetIcon(resourceAppIcon)
 	a.win.Resize(fyne.NewSize(1120, 740))
 	a.win.SetFixedSize(false)
-
-	chatTab := container.NewTabItem("聊天", a.buildChatPage())
-	settingTab := container.NewTabItem("设置", a.buildSettingsPage())
-	a.tabs = container.NewAppTabs(chatTab, settingTab)
-	a.tabs.SetTabLocation(container.TabLocationTop)
-	a.win.SetContent(a.tabs)
+	a.win.SetContent(a.buildChatPage())
 	a.win.SetCloseIntercept(func() {
 		a.shutdown()
 		a.win.Close()
@@ -374,9 +369,7 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	title.TextStyle = fyne.TextStyle{Bold: true}
 	a.topInfo = widget.NewLabel(fmt.Sprintf("%s  ·  %s", a.cfg.Name, shortID(a.cfg.ID)))
 	settingBtn := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
-		if a.tabs != nil {
-			a.tabs.SelectIndex(1)
-		}
+		a.openSettingsWindow()
 	})
 	topBar := container.NewMax(
 		canvas.NewRectangle(color.NRGBA{R: 53, G: 146, B: 255, A: 255}),
@@ -386,13 +379,25 @@ func (a *appState) buildChatPage() fyne.CanvasObject {
 	return container.NewBorder(topBar, nil, nil, nil, split)
 }
 
-func (a *appState) buildSettingsPage() fyne.CanvasObject {
-	a.avatarPreview = avatarImage(a.avatarAbsPath(), 132)
+func (a *appState) openSettingsWindow() {
+	if a.settingsWin != nil {
+		a.settingsWin.Show()
+		a.settingsWin.RequestFocus()
+		return
+	}
 
-	a.nameInput = widget.NewEntry()
-	a.nameInput.SetText(a.cfg.Name)
-	a.idInput = widget.NewEntry()
-	a.idInput.SetText(a.cfg.ID)
+	w := a.uiApp.NewWindow("个人设置")
+	w.SetIcon(resourceAppIcon)
+	w.Resize(fyne.NewSize(520, 420))
+
+	avatarPreview := avatarImage(a.avatarAbsPath(), 132)
+	a.settingsAvatar = avatarPreview
+
+	nameInput := widget.NewEntry()
+	nameInput.SetText(a.cfg.Name)
+	idInput := widget.NewEntry()
+	idInput.SetText(a.cfg.ID)
+	idInput.Disable()
 
 	pickAvatarBtn := widget.NewButton("选择头像", func() {
 		dialog.ShowFileOpen(func(rc fyne.URIReadCloser, err error) {
@@ -404,8 +409,8 @@ func (a *appState) buildSettingsPage() fyne.CanvasObject {
 			if path == "" {
 				return
 			}
-			a.applyAvatar(path)
-		}, a.win)
+			a.applyAvatar(path, w)
+		}, w)
 	})
 	clearAvatarBtn := widget.NewButton("移除头像", func() {
 		a.cfg.Avatar = ""
@@ -414,26 +419,21 @@ func (a *appState) buildSettingsPage() fyne.CanvasObject {
 	})
 
 	copyIDBtn := widget.NewButton("复制识别码", func() {
-		a.win.Clipboard().SetContent(strings.TrimSpace(a.idInput.Text))
+		w.Clipboard().SetContent(strings.TrimSpace(a.cfg.ID))
 		a.pushStatus("已复制")
 	})
-
 	saveBtn := widget.NewButton("保存设置", func() {
-		name := strings.TrimSpace(a.nameInput.Text)
+		name := strings.TrimSpace(nameInput.Text)
 		if name == "" {
 			name = "LanUser"
 		}
-		uid := normalizeUserCode(a.idInput.Text)
-		if uid == "" {
-			dialog.ShowInformation("提示", "识别码格式不正确", a.win)
+		a.cfg.Name = name
+		if err := a.saveConfig(); err != nil {
+			dialog.ShowError(err, w)
 			return
 		}
-		a.cfg.Name = name
-		a.cfg.ID = uid
-		a.idInput.SetText(uid)
-		if err := a.saveConfig(); err != nil {
-			dialog.ShowError(err, a.win)
-			return
+		if a.listenPort > 0 {
+			a.broadcastHello(a.listenPort)
 		}
 		a.refreshContacts()
 		a.refreshAvatarViews()
@@ -444,26 +444,33 @@ func (a *appState) buildSettingsPage() fyne.CanvasObject {
 	})
 
 	avatarRow := container.NewHBox(
-		a.avatarPreview,
+		avatarPreview,
 		container.NewVBox(pickAvatarBtn, clearAvatarBtn),
 	)
 	infoForm := widget.NewForm(
-		widget.NewFormItem("昵称", a.nameInput),
-		widget.NewFormItem("识别码", a.idInput),
+		widget.NewFormItem("昵称", nameInput),
+		widget.NewFormItem("识别码", idInput),
 	)
-	selfCard := widget.NewCard("个人资料", "", container.NewVBox(avatarRow, infoForm, container.NewHBox(copyIDBtn, layout.NewSpacer(), saveBtn)))
-
-	return container.NewPadded(container.NewVBox(selfCard))
+	w.SetContent(container.NewPadded(widget.NewCard("", "", container.NewVBox(avatarRow, infoForm, container.NewHBox(copyIDBtn, layout.NewSpacer(), saveBtn)))))
+	w.SetOnClosed(func() {
+		a.settingsAvatar = nil
+		a.settingsWin = nil
+	})
+	a.settingsWin = w
+	w.Show()
 }
 
-func (a *appState) applyAvatar(srcPath string) {
+func (a *appState) applyAvatar(srcPath string, owner fyne.Window) {
+	if owner == nil {
+		owner = a.win
+	}
 	ext := strings.ToLower(filepath.Ext(srcPath))
 	if ext == "" {
 		ext = ".png"
 	}
 	dst := filepath.Join(a.profileDir, "avatar"+ext)
 	if err := copyFile(srcPath, dst); err != nil {
-		dialog.ShowError(err, a.win)
+		dialog.ShowError(err, owner)
 		return
 	}
 	a.cfg.Avatar = filepath.ToSlash(filepath.Join("data", "profile", filepath.Base(dst)))
@@ -485,8 +492,8 @@ func (a *appState) avatarAbsPath() string {
 func (a *appState) refreshAvatarViews() {
 	path := a.avatarAbsPath()
 	a.safeUI(func() {
-		if a.avatarPreview != nil {
-			setAvatarImage(a.avatarPreview, path)
+		if a.settingsAvatar != nil {
+			setAvatarImage(a.settingsAvatar, path)
 		}
 		if a.headerAvatar != nil {
 			setAvatarImage(a.headerAvatar, path)
@@ -1473,7 +1480,7 @@ func deriveKey(privB64, pubB64 string, salt []byte) ([]byte, error) {
 }
 
 func avatarImage(path string, size float32) *canvas.Image {
-	img := canvas.NewImageFromResource(theme.AccountIcon())
+	img := canvas.NewImageFromResource(resourceDefaultAvatar)
 	img.FillMode = canvas.ImageFillContain
 	img.SetMinSize(fyne.NewSize(size, size))
 	setAvatarImage(img, path)
@@ -1493,7 +1500,7 @@ func setAvatarImage(img *canvas.Image, path string) {
 		}
 	}
 	img.File = ""
-	img.Resource = theme.AccountIcon()
+	img.Resource = resourceDefaultAvatar
 	img.Refresh()
 }
 
@@ -1518,21 +1525,7 @@ func copyFile(src, dst string) error {
 }
 
 func newUserCode() string {
-	return strings.ToUpper(randomID(6))
-}
-
-func normalizeUserCode(s string) string {
-	s = strings.ToUpper(strings.TrimSpace(s))
-	if len(s) < 6 || len(s) > 32 {
-		return ""
-	}
-	for _, r := range s {
-		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			continue
-		}
-		return ""
-	}
-	return s
+	return "LT-" + strings.ToUpper(randomID(16))
 }
 
 func randomID(n int) string {
