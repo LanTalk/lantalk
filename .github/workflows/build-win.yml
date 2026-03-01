@@ -3,7 +3,7 @@ name: build-win-portable
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   build:
@@ -17,23 +17,22 @@ jobs:
         uses: lukka/get-cmake@latest
 
       - name: Configure
-        run: cmake -S . -B out -DLANTALK_ENABLE_DESKTOP=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B out -DLANTALK_DESKTOP=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build out --config Release
 
-      - name: Prepare portable package
+      - name: Prepare portable artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/LanTalk | Out-Null
           if (Test-Path "out/Release/lantalk.exe") {
-            Copy-Item out/Release/lantalk.exe dist/LanTalk/LanTalk.exe -Force
+            Copy-Item "out/Release/lantalk.exe" "dist/LanTalk/LanTalk.exe" -Force
           } elseif (Test-Path "out/lantalk.exe") {
-            Copy-Item out/lantalk.exe dist/LanTalk/LanTalk.exe -Force
+            Copy-Item "out/lantalk.exe" "dist/LanTalk/LanTalk.exe" -Force
           } else {
             throw "lantalk.exe not found"
           }
-          New-Item -ItemType Directory -Force -Path dist/LanTalk/data | Out-Null
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
