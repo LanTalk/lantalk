@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <atomic>
+#include <cstddef>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -46,6 +47,8 @@ private:
   std::string chats_dir_;
   std::string profile_file_;
   std::string peers_file_;
+  std::string lock_file_;
+  std::string instance_id_;
 
   std::string self_id_;
   std::string self_name_;
@@ -55,6 +58,7 @@ private:
   std::mutex mu_;
   std::atomic<bool> running_{false};
   std::thread discover_thread_;
+  std::uintptr_t lock_handle_{0};
 
   static std::string trim(const std::string &in);
   static std::string to_upper(std::string in);
@@ -64,10 +68,15 @@ private:
   static std::string sanitize_id(const std::string &raw);
   static std::string b64_encode(const std::string &in);
   static std::string b64_decode(const std::string &in);
+  static std::string data_slot_name(int idx);
+  static std::string local_ipv4_broadcast();
 
   static std::string exe_dir();
   static std::vector<std::string> split_tab(const std::string &line);
 
+  void select_data_dir();
+  bool try_lock_data_dir(const std::string &dir);
+  void release_data_dir_lock();
   void ensure_dirs();
   void load_profile();
   void save_profile();

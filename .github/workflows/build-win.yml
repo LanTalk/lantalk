@@ -17,19 +17,19 @@ jobs:
         uses: lukka/get-cmake@latest
 
       - name: Configure
-        run: cmake -S . -B build -DLANTALK_ENABLE_DESKTOP=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B out -DLANTALK_ENABLE_DESKTOP=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build out --config Release
 
       - name: Prepare portable package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/LanTalk | Out-Null
-          if (Test-Path "build/Release/lantalk.exe") {
-            Copy-Item build/Release/lantalk.exe dist/LanTalk/LanTalk.exe -Force
-          } elseif (Test-Path "build/lantalk.exe") {
-            Copy-Item build/lantalk.exe dist/LanTalk/LanTalk.exe -Force
+          if (Test-Path "out/Release/lantalk.exe") {
+            Copy-Item out/Release/lantalk.exe dist/LanTalk/LanTalk.exe -Force
+          } elseif (Test-Path "out/lantalk.exe") {
+            Copy-Item out/lantalk.exe dist/LanTalk/LanTalk.exe -Force
           } else {
             throw "lantalk.exe not found"
           }

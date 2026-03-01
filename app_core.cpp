@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iomanip>
 #include <random>
@@ -16,15 +17,23 @@
 #include <Ws2tcpip.h>
 #include <Windows.h>
 #elif defined(__APPLE__)
+#include <fcntl.h>
+#include <ifaddrs.h>
 #include <mach-o/dyld.h>
 #include <arpa/inet.h>
+#include <net/if.h>
 #include <netinet/in.h>
+#include <sys/file.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netinet/in.h>
+#include <sys/file.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -62,7 +71,8 @@ void close_socket(socket_t sock) {
 
 app_core::app_core() {
   base_dir_ = exe_dir();
-  data_dir_ = (std::filesystem::path(base_dir_) / "data").string();
+  instance_id_ = random_hex(4);
+  select_data_dir();
   chats_dir_ = (std::filesystem::path(data_dir_) / "chats").string();
   profile_file_ = (std::filesystem::path(data_dir_) / "profile.txt").string();
   peers_file_ = (std::filesystem::path(data_dir_) / "peers.txt").string();
@@ -70,6 +80,7 @@ app_core::app_core() {
 
 app_core::~app_core() {
   stop_discovery();
+  release_data_dir_lock();
 }
 
 void app_core::boot() {
@@ -341,6 +352,111 @@ std::vector<std::string> app_core::split_tab(const std::string &line) {
   return parts;
 }
 
+std::string app_core::data_slot_name(int idx) {
+  if (idx <= 0) {
+    return "data";
+  }
+  return "data(" + std::to_string(idx) + ")";
+}
+
+std::string app_core::local_ipv4_broadcast() {
+#if defined(_WIN32)
+  return "255.255.255.255";
+#else
+  struct ifaddrs *ifaddr = nullptr;
+  if (getifaddrs(&ifaddr) != 0 || ifaddr == nullptr) {
+    return "255.255.255.255";
+  }
+
+  std::string best = "255.255.255.255";
+  for (auto *ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+    if (ifa->ifa_addr == nullptr || ifa->ifa_netmask == nullptr) {
+      continue;
+    }
+    if (ifa->ifa_addr->sa_family != AF_INET) {
+      continue;
+    }
+    if (!(ifa->ifa_flags & IFF_UP) || (ifa->ifa_flags & IFF_LOOPBACK)) {
+      continue;
+    }
+    const auto *addr = reinterpret_cast<sockaddr_in *>(ifa->ifa_addr);
+    const auto *mask = reinterpret_cast<sockaddr_in *>(ifa->ifa_netmask);
+    const std::uint32_t ip = ntohl(addr->sin_addr.s_addr);
+    const std::uint32_t mk = ntohl(mask->sin_addr.s_addr);
+    const std::uint32_t bc = (ip & mk) | (~mk);
+    in_addr out{};
+    out.s_addr = htonl(bc);
+    char buf[INET_ADDRSTRLEN] = {0};
+    if (inet_ntop(AF_INET, &out, buf, sizeof(buf)) != nullptr) {
+      best = buf;
+      break;
+    }
+  }
+
+  freeifaddrs(ifaddr);
+  return best;
+#endif
+}
+
+void app_core::select_data_dir() {
+  for (int i = 0; i < 64; ++i) {
+    const auto candidate = (std::filesystem::path(base_dir_) / data_slot_name(i)).string();
+    std::filesystem::create_directories(candidate);
+    if (try_lock_data_dir(candidate)) {
+      data_dir_ = candidate;
+      return;
+    }
+  }
+  const auto fallback = (std::filesystem::path(base_dir_) / ("data_" + random_hex(2))).string();
+  std::filesystem::create_directories(fallback);
+  if (try_lock_data_dir(fallback)) {
+    data_dir_ = fallback;
+    return;
+  }
+  data_dir_ = (std::filesystem::path(base_dir_) / "data").string();
+}
+
+bool app_core::try_lock_data_dir(const std::string &dir) {
+  lock_file_ = (std::filesystem::path(dir) / ".slot.lock").string();
+#if defined(_WIN32)
+  HANDLE h = CreateFileA(lock_file_.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    lock_handle_ = 0;
+    return false;
+  }
+  lock_handle_ = reinterpret_cast<std::uintptr_t>(h);
+  return true;
+#else
+  const int fd = open(lock_file_.c_str(), O_CREAT | O_RDWR, 0644);
+  if (fd < 0) {
+    lock_handle_ = 0;
+    return false;
+  }
+  if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    close(fd);
+    lock_handle_ = 0;
+    return false;
+  }
+  lock_handle_ = static_cast<std::uintptr_t>(fd);
+  return true;
+#endif
+}
+
+void app_core::release_data_dir_lock() {
+  if (lock_handle_ == 0) {
+    return;
+  }
+#if defined(_WIN32)
+  auto h = reinterpret_cast<HANDLE>(lock_handle_);
+  CloseHandle(h);
+#else
+  const int fd = static_cast<int>(lock_handle_);
+  flock(fd, LOCK_UN);
+  close(fd);
+#endif
+  lock_handle_ = 0;
+}
+
 void app_core::ensure_dirs() {
   std::filesystem::create_directories(data_dir_);
   std::filesystem::create_directories(chats_dir_);
@@ -540,8 +656,14 @@ void app_core::discovery_loop() {
     return;
   }
 
+  ip_mreq mreq{};
+  mreq.imr_multiaddr.s_addr = inet_addr("239.255.77.77");
+  mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+  setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char *>(&mreq), sizeof(mreq));
+
   std::int64_t last_announce = 0;
   std::int64_t last_online_refresh = 0;
+  const auto directed_broadcast = local_ipv4_broadcast();
 
   while (running_.load()) {
     const auto now = now_unix();
@@ -553,12 +675,21 @@ void app_core::discovery_loop() {
         self_id = self_id_;
         self_name = self_name_;
       }
-      const std::string payload = "LT_DISCOVERY\t" + self_id + "\t" + b64_encode(self_name) + "\t" + std::to_string(now);
-      sockaddr_in bcast{};
-      bcast.sin_family = AF_INET;
-      bcast.sin_port = htons(static_cast<std::uint16_t>(k_discovery_port));
-      bcast.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-      sendto(sock, payload.c_str(), static_cast<int>(payload.size()), 0, reinterpret_cast<const sockaddr *>(&bcast), sizeof(bcast));
+      const std::string payload = "LT_DISCOVERY\t" + self_id + "\t" + instance_id_ + "\t" + b64_encode(self_name) + "\t" + std::to_string(now);
+
+      const auto send_to = [&](const char *ip) {
+        sockaddr_in target{};
+        target.sin_family = AF_INET;
+        target.sin_port = htons(static_cast<std::uint16_t>(k_discovery_port));
+        if (inet_pton(AF_INET, ip, &target.sin_addr) == 1) {
+          sendto(sock, payload.c_str(), static_cast<int>(payload.size()), 0, reinterpret_cast<const sockaddr *>(&target), sizeof(target));
+        }
+      };
+      send_to("255.255.255.255");
+      send_to("239.255.77.77");
+      if (!directed_broadcast.empty() && directed_broadcast != "255.255.255.255") {
+        send_to(directed_broadcast.c_str());
+      }
       last_announce = now;
     }
 
@@ -568,7 +699,11 @@ void app_core::discovery_loop() {
     timeval tv{};
     tv.tv_sec = 1;
     tv.tv_usec = 0;
+#if defined(_WIN32)
+    const int ready = select(0, &rfds, nullptr, nullptr, &tv);
+#else
     const int ready = select(static_cast<int>(sock + 1), &rfds, nullptr, nullptr, &tv);
+#endif
     if (ready > 0 && FD_ISSET(sock, &rfds)) {
       char buf[1024] = {0};
       sockaddr_in from{};
@@ -583,14 +718,28 @@ void app_core::discovery_loop() {
         auto parts = split_tab(line);
         if (parts.size() >= 4 && parts[0] == "LT_DISCOVERY") {
           const auto id = sanitize_id(parts[1]);
-          const auto name = trim(b64_decode(parts[2]));
+          std::string from_instance;
+          std::string name;
           std::int64_t seen = now;
-          try {
-            seen = std::stoll(parts[3]);
-          } catch (...) {
-            seen = now;
+          if (parts.size() >= 5) {
+            from_instance = trim(parts[2]);
+            name = trim(b64_decode(parts[3]));
+            try {
+              seen = std::stoll(parts[4]);
+            } catch (...) {
+              seen = now;
+            }
+          } else {
+            name = trim(b64_decode(parts[2]));
+            try {
+              seen = std::stoll(parts[3]);
+            } catch (...) {
+              seen = now;
+            }
           }
-          upsert_peer_seen(id, name, seen);
+          if (!(id == self_id_ && from_instance == instance_id_)) {
+            upsert_peer_seen(id, name, seen);
+          }
         }
       }
     }

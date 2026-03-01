@@ -18,9 +18,9 @@ endif()
 option(LANTALK_ENABLE_DESKTOP "Build desktop shell with embedded WebView" ${LANTALK_ENABLE_DESKTOP_DEFAULT})
 
 add_library(lantalk_core
-  src/app_core.cpp
+  app_core.cpp
 )
-target_include_directories(lantalk_core PUBLIC src)
+target_include_directories(lantalk_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(WIN32)
   target_link_libraries(lantalk_core PUBLIC ws2_32)
 endif()
@@ -34,7 +34,7 @@ if(LANTALK_ENABLE_DESKTOP)
   )
   FetchContent_MakeAvailable(webview)
 
-  add_executable(lantalk src/main.cpp)
+  add_executable(lantalk main.cpp)
   target_link_libraries(lantalk PRIVATE lantalk_core webview::core)
 
   if(WIN32)
@@ -42,6 +42,6 @@ if(LANTALK_ENABLE_DESKTOP)
     set_target_properties(lantalk PROPERTIES WIN32_EXECUTABLE YES)
   endif()
 else()
-  add_executable(lantalk src/headless_main.cpp)
+  add_executable(lantalk headless_main.cpp)
   target_link_libraries(lantalk PRIVATE lantalk_core)
 endif()

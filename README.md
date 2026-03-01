@@ -8,10 +8,10 @@ LanTalk 已重构为 **C++ Core + Embedded Web UI** 架构（参考 QQ NT 的桌
 
 ## 目录结构
 
-- `src/app_core.h` / `src/app_core.cpp`：核心逻辑
-- `src/main.cpp`：桌面壳入口（WebView）
-- `src/headless_main.cpp`：无桌面依赖的核心验证入口
-- `src/ui_embedded.h`：内嵌 Web UI（编译进 exe）
+- `app_core.h` / `app_core.cpp`：核心逻辑
+- `main.cpp`：桌面壳入口（WebView）
+- `headless_main.cpp`：无桌面依赖的核心验证入口
+- `ui_embedded.h`：内嵌 Web UI（编译进 exe）
 - `.github/workflows/build-win.yml`：Windows 便携打包
 
 ## 数据目录
@@ -27,16 +27,16 @@ LanTalk 已重构为 **C++ Core + Embedded Web UI** 架构（参考 QQ NT 的桌
 ### Linux（核心验证）
 
 ```bash
-cmake -S . -B build -DLANTALK_ENABLE_DESKTOP=OFF
-cmake --build build -j
-./build/lantalk
+cmake -S . -B out-headless -DLANTALK_ENABLE_DESKTOP=OFF
+cmake --build out-headless -j
+./out-headless/lantalk
 ```
 
 ### Windows（桌面版）
 
 ```powershell
-cmake -S . -B build -DLANTALK_ENABLE_DESKTOP=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+cmake -S . -B out -DLANTALK_ENABLE_DESKTOP=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build out --config Release
 ```
 
 ## 当前状态

@@ -1,5 +1,5 @@
-/build/
-/build-headless/
+/out/
+/out-headless/
 /dist/
 /data/
 /lantalk
