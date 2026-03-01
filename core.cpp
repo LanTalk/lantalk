@@ -437,11 +437,14 @@ bool AppCore::boot(std::string &error) {
   load_peers();
   load_messages();
 
+  // Must be true before network threads start, otherwise discovery/accept
+  // threads can exit immediately on slow schedulers (notably on Windows CI).
+  running_.store(true);
   if (!start_network(error)) {
+    running_.store(false);
     return false;
   }
 
-  running_.store(true);
   bump_revision();
   return true;
 }
