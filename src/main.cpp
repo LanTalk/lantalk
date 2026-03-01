@@ -148,7 +148,7 @@ std::string arg_at(const std::string &req, std::size_t idx) {
 
 } // namespace
 
-int main() {
+int run_app() {
   lantalk::app_core core;
   core.boot();
 
@@ -169,4 +169,14 @@ int main() {
   win.set_html(load_ui_html());
   win.run();
   return 0;
+}
+
+#if defined(_WIN32)
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+  return run_app();
+}
+#endif
+
+int main() {
+  return run_app();
 }
