@@ -724,18 +724,8 @@ void app_core::discovery_loop() {
           if (parts.size() >= 5) {
             from_instance = trim(parts[2]);
             name = trim(b64_decode(parts[3]));
-            try {
-              seen = std::stoll(parts[4]);
-            } catch (...) {
-              seen = now;
-            }
           } else {
             name = trim(b64_decode(parts[2]));
-            try {
-              seen = std::stoll(parts[3]);
-            } catch (...) {
-              seen = now;
-            }
           }
           if (!(id == self_id_ && from_instance == instance_id_)) {
             upsert_peer_seen(id, name, seen);
