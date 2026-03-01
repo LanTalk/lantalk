@@ -9,8 +9,12 @@
 #include <webview/webview.h>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <Windows.h>
 #include <ShObjIdl.h>
 #endif
@@ -202,7 +206,7 @@ int run_app() {
     return core.handle_rpc(args[0]);
   });
 
-  win.set_html(lantalk::kUiHtml);
+  win.set_html(lantalk::ui_html());
   win.run();
 
   core.shutdown();
