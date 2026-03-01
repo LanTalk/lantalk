@@ -1,9 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
+cmake_policy(SET CMP0091 NEW)
 project(lantalk LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 if(WIN32 OR APPLE)
   set(LANTALK_ENABLE_DESKTOP_DEFAULT ON)
