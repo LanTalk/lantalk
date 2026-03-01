@@ -18,9 +18,12 @@ endif()
 option(LANTALK_ENABLE_DESKTOP "Build desktop shell with embedded WebView" ${LANTALK_ENABLE_DESKTOP_DEFAULT})
 
 add_library(lantalk_core
-  src/core/app_core.cpp
+  src/app_core.cpp
 )
 target_include_directories(lantalk_core PUBLIC src)
+if(WIN32)
+  target_link_libraries(lantalk_core PUBLIC ws2_32)
+endif()
 
 if(LANTALK_ENABLE_DESKTOP)
   include(FetchContent)

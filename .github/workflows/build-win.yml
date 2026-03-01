@@ -33,9 +33,6 @@ jobs:
           } else {
             throw "lantalk.exe not found"
           }
-          New-Item -ItemType Directory -Force -Path dist/LanTalk/ui | Out-Null
-          Copy-Item ui/index.html dist/LanTalk/ui/index.html -Force
-          Copy-Item README.md dist/LanTalk/README.md -Force
           New-Item -ItemType Directory -Force -Path dist/LanTalk/data | Out-Null
 
       - name: Upload artifact

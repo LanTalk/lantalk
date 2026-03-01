@@ -8,10 +8,10 @@ LanTalk 已重构为 **C++ Core + Embedded Web UI** 架构（参考 QQ NT 的桌
 
 ## 目录结构
 
-- `src/core/`：核心逻辑
+- `src/app_core.h` / `src/app_core.cpp`：核心逻辑
 - `src/main.cpp`：桌面壳入口（WebView）
 - `src/headless_main.cpp`：无桌面依赖的核心验证入口
-- `ui/index.html`：Web UI 主界面
+- `src/ui_embedded.h`：内嵌 Web UI（编译进 exe）
 - `.github/workflows/build-win.yml`：Windows 便携打包
 
 ## 数据目录
@@ -44,8 +44,9 @@ cmake --build build --config Release
 本次是一次彻底架构迁移，已完成：
 
 - C++ 核心工程化
+- 局域网自动发现（UDP 广播心跳）
 - Web UI 三栏主界面（QQ NT 风格布局）
 - Native Bridge（读取身份、会话列表、消息、发送文本、改昵称）
 - 本地数据持久化
 
-文件/图片传输、局域网自动发现、端到端加密链路会在这个新架构上继续补齐。
+文件/图片传输与端到端加密链路会在这个新架构上继续补齐。

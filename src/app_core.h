@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -28,6 +30,7 @@ struct peer {
 class app_core {
 public:
   app_core();
+  ~app_core();
   void boot();
 
   std::string self_json();
@@ -50,6 +53,8 @@ private:
   std::unordered_map<std::string, peer> peers_;
   std::unordered_map<std::string, std::vector<message>> chats_;
   std::mutex mu_;
+  std::atomic<bool> running_{false};
+  std::thread discover_thread_;
 
   static std::string trim(const std::string &in);
   static std::string to_upper(std::string in);
@@ -70,9 +75,12 @@ private:
   void save_peers();
   void load_chats();
   void save_chat(const std::string &peer_id);
-
-  void ensure_demo_peer();
   std::string make_msg_id() const;
+  void refresh_online_locked(std::int64_t now);
+  void upsert_peer_seen(const std::string &id, const std::string &name, std::int64_t seen_at);
+  void start_discovery();
+  void stop_discovery();
+  void discovery_loop();
 };
 
 } // namespace lantalk

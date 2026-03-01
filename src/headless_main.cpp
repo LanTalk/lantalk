@@ -1,4 +1,4 @@
-#include "core/app_core.h"
+#include "app_core.h"
 
 #include <iostream>
 

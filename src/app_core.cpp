@@ -1,8 +1,9 @@
-#include "core/app_core.h"
+#include "app_core.h"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -11,11 +12,21 @@
 
 #if defined(_WIN32)
 #define NOMINMAX
+#include <WinSock2.h>
+#include <Ws2tcpip.h>
 #include <Windows.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -23,9 +34,28 @@ namespace lantalk {
 namespace {
 
 constexpr char k_b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+constexpr int k_discovery_port = 43999;
+constexpr std::int64_t k_presence_ttl_sec = 20;
+constexpr std::int64_t k_announce_every_sec = 3;
+
+#if defined(_WIN32)
+using socket_t = SOCKET;
+constexpr socket_t k_invalid_socket = INVALID_SOCKET;
+#else
+using socket_t = int;
+constexpr socket_t k_invalid_socket = -1;
+#endif
 
 bool is_b64(unsigned char c) {
   return std::isalnum(c) || c == '+' || c == '/';
+}
+
+void close_socket(socket_t sock) {
+#if defined(_WIN32)
+  closesocket(sock);
+#else
+  close(sock);
+#endif
 }
 
 } // namespace
@@ -38,13 +68,19 @@ app_core::app_core() {
   peers_file_ = (std::filesystem::path(data_dir_) / "peers.txt").string();
 }
 
+app_core::~app_core() {
+  stop_discovery();
+}
+
 void app_core::boot() {
-  std::scoped_lock lk(mu_);
-  ensure_dirs();
-  load_profile();
-  load_peers();
-  load_chats();
-  ensure_demo_peer();
+  {
+    std::scoped_lock lk(mu_);
+    ensure_dirs();
+    load_profile();
+    load_peers();
+    load_chats();
+  }
+  start_discovery();
 }
 
 std::string app_core::self_json() {
@@ -59,6 +95,7 @@ std::string app_core::self_json() {
 
 std::string app_core::conversations_json() {
   std::scoped_lock lk(mu_);
+  refresh_online_locked(now_unix());
   std::vector<peer> rows;
   rows.reserve(peers_.size());
   for (const auto &it : peers_) {
@@ -417,15 +454,171 @@ void app_core::save_chat(const std::string &peer_id) {
   }
 }
 
-void app_core::ensure_demo_peer() {
-  if (!peers_.empty()) return;
-  peer p;
-  p.id = "DEMO001";
-  p.name = "演示联系人";
-  p.online = true;
-  p.last_seen_at = now_unix();
-  peers_[p.id] = p;
-  save_peers();
+void app_core::refresh_online_locked(std::int64_t now) {
+  for (auto &it : peers_) {
+    auto &p = it.second;
+    p.online = (p.last_seen_at > 0 && (now - p.last_seen_at) <= k_presence_ttl_sec);
+  }
+}
+
+void app_core::upsert_peer_seen(const std::string &id, const std::string &name, std::int64_t seen_at) {
+  if (id.empty()) return;
+  bool need_save = false;
+  {
+    std::scoped_lock lk(mu_);
+    if (id == self_id_) return;
+    auto it = peers_.find(id);
+    if (it == peers_.end()) {
+      peer p;
+      p.id = id;
+      p.name = name.empty() ? id : name;
+      p.online = true;
+      p.last_seen_at = seen_at;
+      peers_[id] = p;
+      need_save = true;
+    } else {
+      auto &p = it->second;
+      if (!name.empty() && p.name != name) {
+        p.name = name;
+        need_save = true;
+      }
+      p.online = true;
+      p.last_seen_at = seen_at;
+    }
+  }
+  if (need_save) {
+    std::scoped_lock lk(mu_);
+    save_peers();
+  }
+}
+
+void app_core::start_discovery() {
+  if (running_.exchange(true)) {
+    return;
+  }
+  discover_thread_ = std::thread([this]() { discovery_loop(); });
+}
+
+void app_core::stop_discovery() {
+  if (!running_.exchange(false)) {
+    return;
+  }
+  if (discover_thread_.joinable()) {
+    discover_thread_.join();
+  }
+}
+
+void app_core::discovery_loop() {
+#if defined(_WIN32)
+  WSADATA wsa{};
+  if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+    return;
+  }
+#endif
+
+  socket_t sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (sock == k_invalid_socket) {
+#if defined(_WIN32)
+    WSACleanup();
+#endif
+    return;
+  }
+
+  int yes = 1;
+  setsockopt(sock, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char *>(&yes), sizeof(yes));
+  setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char *>(&yes), sizeof(yes));
+
+  sockaddr_in bind_addr{};
+  bind_addr.sin_family = AF_INET;
+  bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  bind_addr.sin_port = htons(static_cast<std::uint16_t>(k_discovery_port));
+  if (bind(sock, reinterpret_cast<sockaddr *>(&bind_addr), sizeof(bind_addr)) < 0) {
+    close_socket(sock);
+#if defined(_WIN32)
+    WSACleanup();
+#endif
+    return;
+  }
+
+  std::int64_t last_announce = 0;
+  std::int64_t last_online_refresh = 0;
+
+  while (running_.load()) {
+    const auto now = now_unix();
+    if (now - last_announce >= k_announce_every_sec) {
+      std::string self_id;
+      std::string self_name;
+      {
+        std::scoped_lock lk(mu_);
+        self_id = self_id_;
+        self_name = self_name_;
+      }
+      const std::string payload = "LT_DISCOVERY\t" + self_id + "\t" + b64_encode(self_name) + "\t" + std::to_string(now);
+      sockaddr_in bcast{};
+      bcast.sin_family = AF_INET;
+      bcast.sin_port = htons(static_cast<std::uint16_t>(k_discovery_port));
+      bcast.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+      sendto(sock, payload.c_str(), static_cast<int>(payload.size()), 0, reinterpret_cast<const sockaddr *>(&bcast), sizeof(bcast));
+      last_announce = now;
+    }
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(sock, &rfds);
+    timeval tv{};
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    const int ready = select(static_cast<int>(sock + 1), &rfds, nullptr, nullptr, &tv);
+    if (ready > 0 && FD_ISSET(sock, &rfds)) {
+      char buf[1024] = {0};
+      sockaddr_in from{};
+#if defined(_WIN32)
+      int from_len = sizeof(from);
+#else
+      socklen_t from_len = sizeof(from);
+#endif
+      const int n = recvfrom(sock, buf, sizeof(buf) - 1, 0, reinterpret_cast<sockaddr *>(&from), &from_len);
+      if (n > 0) {
+        const std::string line(buf, static_cast<std::size_t>(n));
+        auto parts = split_tab(line);
+        if (parts.size() >= 4 && parts[0] == "LT_DISCOVERY") {
+          const auto id = sanitize_id(parts[1]);
+          const auto name = trim(b64_decode(parts[2]));
+          std::int64_t seen = now;
+          try {
+            seen = std::stoll(parts[3]);
+          } catch (...) {
+            seen = now;
+          }
+          upsert_peer_seen(id, name, seen);
+        }
+      }
+    }
+
+    if (now - last_online_refresh >= 2) {
+      bool need_save = false;
+      {
+        std::scoped_lock lk(mu_);
+        for (auto &it : peers_) {
+          auto &p = it.second;
+          const bool was_online = p.online;
+          p.online = (p.last_seen_at > 0 && (now - p.last_seen_at) <= k_presence_ttl_sec);
+          if (was_online != p.online && !p.online) {
+            need_save = true;
+          }
+        }
+        if (need_save) {
+          save_peers();
+        }
+      }
+      last_online_refresh = now;
+    }
+  }
+
+  close_socket(sock);
+#if defined(_WIN32)
+  WSACleanup();
+#endif
 }
 
 std::string app_core::make_msg_id() const {

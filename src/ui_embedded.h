@@ -1,3 +1,6 @@
+#pragma once
+namespace lantalk {
+inline constexpr const char kEmbeddedUI[] = R"LTUI(
 <!doctype html>
 <html lang="zh-CN">
 <head>
@@ -115,6 +118,7 @@
     let self = null;
     let conversations = [];
     let activePeerId = "";
+    let syncing = false;
 
     const el = {
       selfAvatar: document.getElementById("selfAvatar"),
@@ -236,7 +240,16 @@
       if (!ok) return;
       el.inputBox.value = "";
       await loadConversations();
-      await renderMessages();
+    }
+
+    async function refreshTick() {
+      if (syncing) return;
+      syncing = true;
+      try {
+        await loadConversations();
+      } finally {
+        syncing = false;
+      }
     }
 
     el.inputBox.addEventListener("keydown", async (e) => {
@@ -268,7 +281,10 @@
     (async function boot() {
       await loadSelf();
       await loadConversations();
+      setInterval(refreshTick, 2000);
     })();
   </script>
 </body>
 </html>
+)LTUI";
+} // namespace lantalk
