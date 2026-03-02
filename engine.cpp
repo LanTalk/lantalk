@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <random>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -124,6 +125,74 @@ bool recv_frame(socket_t sock, std::string &payload) {
   return recv_all(sock, reinterpret_cast<std::uint8_t *>(payload.data()), payload.size());
 }
 
+bool set_blocking(socket_t sock, bool blocking) {
+#if defined(_WIN32)
+  u_long mode = blocking ? 0 : 1;
+  return ioctlsocket(sock, FIONBIO, &mode) == 0;
+#else
+  const int flags = fcntl(sock, F_GETFL, 0);
+  if (flags < 0) {
+    return false;
+  }
+  int next = flags;
+  if (blocking) {
+    next &= ~O_NONBLOCK;
+  } else {
+    next |= O_NONBLOCK;
+  }
+  return fcntl(sock, F_SETFL, next) == 0;
+#endif
+}
+
+bool connect_with_timeout(socket_t sock, const sockaddr_in &addr, int timeout_ms) {
+  if (!set_blocking(sock, false)) {
+    return false;
+  }
+
+  const int rc = connect(sock, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr));
+  if (rc == 0) {
+    set_blocking(sock, true);
+    return true;
+  }
+
+#if defined(_WIN32)
+  const int in_progress = WSAGetLastError();
+  if (in_progress != WSAEWOULDBLOCK && in_progress != WSAEINPROGRESS && in_progress != WSAEINVAL) {
+    set_blocking(sock, true);
+    return false;
+  }
+#else
+  if (errno != EINPROGRESS) {
+    set_blocking(sock, true);
+    return false;
+  }
+#endif
+
+  fd_set wfds;
+  FD_ZERO(&wfds);
+  FD_SET(sock, &wfds);
+
+  timeval tv{};
+  tv.tv_sec = timeout_ms / 1000;
+  tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+  const int sel = select(static_cast<int>(sock + 1), nullptr, &wfds, nullptr, &tv);
+  if (sel <= 0 || !FD_ISSET(sock, &wfds)) {
+    set_blocking(sock, true);
+    return false;
+  }
+
+  int err = 0;
+  socklen_t len = sizeof(err);
+  if (getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&err), &len) != 0 || err != 0) {
+    set_blocking(sock, true);
+    return false;
+  }
+
+  set_blocking(sock, true);
+  return true;
+}
+
 bool parse_u16(const std::string &s, std::uint16_t &out) {
   try {
     const auto v = std::stoul(s);
@@ -220,6 +289,7 @@ struct LanTalkEngine::SocketState {
   socket_t tcp_listen = kInvalidSocket;
   std::uint16_t listen_port = 0;
   std::thread discovery_thread;
+  std::thread probe_thread;
   std::thread accept_thread;
 };
 
@@ -465,43 +535,50 @@ bool LanTalkEngine::start_network(std::string &error) {
     return false;
   }
 
-  sockets_->udp_recv = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   sockets_->udp_send = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (sockets_->udp_recv == kInvalidSocket || sockets_->udp_send == kInvalidSocket) {
-    error = "cannot create udp sockets";
-    stop_network();
-    return false;
+  if (sockets_->udp_send != kInvalidSocket) {
+    int yes = 1;
+#if defined(_WIN32)
+    setsockopt(sockets_->udp_send, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char *>(&yes), sizeof(yes));
+#else
+    setsockopt(sockets_->udp_send, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+#endif
   }
 
-  int yes = 1;
+  sockets_->udp_recv = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (sockets_->udp_recv != kInvalidSocket) {
+    int yes = 1;
 #if defined(_WIN32)
-  setsockopt(sockets_->udp_recv, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char *>(&yes), sizeof(yes));
-  setsockopt(sockets_->udp_send, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char *>(&yes), sizeof(yes));
+    setsockopt(sockets_->udp_recv, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char *>(&yes), sizeof(yes));
 #else
-  setsockopt(sockets_->udp_recv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-  setsockopt(sockets_->udp_send, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+    setsockopt(sockets_->udp_recv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 #endif
 
-  sockaddr_in recv_addr{};
-  recv_addr.sin_family = AF_INET;
-  recv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  recv_addr.sin_port = htons(kDiscoveryPort);
-  if (bind(sockets_->udp_recv, reinterpret_cast<sockaddr *>(&recv_addr), sizeof(recv_addr)) != 0) {
-    error = "cannot bind discovery port";
-    stop_network();
-    return false;
+    sockaddr_in recv_addr{};
+    recv_addr.sin_family = AF_INET;
+    recv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    recv_addr.sin_port = htons(kDiscoveryPort);
+    if (bind(sockets_->udp_recv, reinterpret_cast<sockaddr *>(&recv_addr), sizeof(recv_addr)) != 0) {
+      close_socket(sockets_->udp_recv);
+      sockets_->udp_recv = kInvalidSocket;
+    } else {
+      ip_mreq mreq{};
+      mreq.imr_multiaddr.s_addr = inet_addr(kMulticastAddr);
+      mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+#if defined(_WIN32)
+      setsockopt(sockets_->udp_recv,
+                 IPPROTO_IP,
+                 IP_ADD_MEMBERSHIP,
+                 reinterpret_cast<const char *>(&mreq),
+                 sizeof(mreq));
+#else
+      setsockopt(sockets_->udp_recv, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+#endif
+    }
   }
-
-  ip_mreq mreq{};
-  mreq.imr_multiaddr.s_addr = inet_addr(kMulticastAddr);
-  mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-#if defined(_WIN32)
-  setsockopt(sockets_->udp_recv, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char *>(&mreq), sizeof(mreq));
-#else
-  setsockopt(sockets_->udp_recv, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
-#endif
 
   sockets_->discovery_thread = std::thread([this]() { discovery_loop(); });
+  sockets_->probe_thread = std::thread([this]() { probe_loop(); });
   sockets_->accept_thread = std::thread([this]() { accept_loop(); });
   return true;
 }
@@ -520,6 +597,9 @@ void LanTalkEngine::stop_network() {
 
   if (sockets_->discovery_thread.joinable()) {
     sockets_->discovery_thread.join();
+  }
+  if (sockets_->probe_thread.joinable()) {
+    sockets_->probe_thread.join();
   }
   if (sockets_->accept_thread.joinable()) {
     sockets_->accept_thread.join();
@@ -581,6 +661,13 @@ void LanTalkEngine::announce_presence(bool reply_only, const std::string &target
 
   send_to_ip("255.255.255.255", kDiscoveryPort);
   send_to_ip(kMulticastAddr, kDiscoveryPort);
+  const auto local = primary_ipv4();
+  if (!local.empty()) {
+    const auto parts = split(local, '.');
+    if (parts.size() == 4) {
+      send_to_ip(parts[0] + "." + parts[1] + "." + parts[2] + ".255", kDiscoveryPort);
+    }
+  }
   for (const auto &ip : known_ips) {
     send_to_ip(ip, kDiscoveryPort);
   }
@@ -702,6 +789,135 @@ void LanTalkEngine::discovery_loop() {
   }
 }
 
+void LanTalkEngine::probe_loop() {
+  while (running_.load()) {
+    std::set<std::pair<std::string, std::uint16_t>> targets;
+
+    std::string local_ip = primary_ipv4();
+    if (!local_ip.empty()) {
+      for (std::uint16_t p = kListenPortStart; p <= kListenPortEnd; ++p) {
+        targets.insert({local_ip, p});
+      }
+    }
+    for (std::uint16_t p = kListenPortStart; p <= kListenPortEnd; ++p) {
+      targets.insert({"127.0.0.1", p});
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      for (const auto &[id, peer] : peers_) {
+        if (!peer.ip.empty()) {
+          if (peer.port != 0) {
+            targets.insert({peer.ip, peer.port});
+          }
+          targets.insert({peer.ip, kListenPortStart});
+        }
+      }
+    }
+
+    if (!local_ip.empty()) {
+      const auto parts = split(local_ip, '.');
+      if (parts.size() == 4) {
+        for (int i = 0; i < 64; ++i) {
+          const int host = static_cast<int>((probe_cursor_ + i) % 254) + 1;
+          const auto ip = parts[0] + "." + parts[1] + "." + parts[2] + "." + std::to_string(host);
+          if (ip != local_ip) {
+            targets.insert({ip, kListenPortStart});
+          }
+        }
+        probe_cursor_ = (probe_cursor_ + 64) % 254;
+      }
+    }
+
+    for (const auto &[ip, port] : targets) {
+      if (!running_.load()) {
+        break;
+      }
+      probe_target(ip, port);
+    }
+
+    for (int i = 0; i < 20 && running_.load(); ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+  }
+}
+
+void LanTalkEngine::probe_target(const std::string &ip, std::uint16_t port) {
+  if (ip.empty() || port == 0) {
+    return;
+  }
+
+  socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (sock == kInvalidSocket) {
+    return;
+  }
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) != 1) {
+    close_socket(sock);
+    return;
+  }
+
+  if (!connect_with_timeout(sock, addr, 220)) {
+    close_socket(sock);
+    return;
+  }
+
+  std::uint16_t self_port = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (sockets_ != nullptr) {
+      self_port = sockets_->listen_port;
+    }
+  }
+
+  const auto probe = "PROBE\t" + self_id_ + "\t" + b64_encode(self_name_) + "\t" + std::to_string(self_port);
+  if (!send_frame(sock, probe)) {
+    close_socket(sock);
+    return;
+  }
+
+  std::string ack;
+  if (!recv_frame(sock, ack)) {
+    close_socket(sock);
+    return;
+  }
+  close_socket(sock);
+
+  const auto parts = split(ack, '\t');
+  if (parts.size() < 4 || parts[0] != "PROBE_ACK") {
+    return;
+  }
+
+  const auto peer_id = trim(parts[1]);
+  if (peer_id.empty() || peer_id == self_id_) {
+    return;
+  }
+
+  const auto peer_name = b64_decode(parts[2]);
+  std::uint16_t peer_port = 0;
+  if (!parse_u16(parts[3], peer_port)) {
+    peer_port = port;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto &p = peers_[peer_id];
+    if (p.id.empty()) {
+      p.id = peer_id;
+      p.first_seen_ms = now_ms();
+    }
+    p.name = peer_name.empty() ? (p.name.empty() ? peer_id : p.name) : peer_name;
+    p.ip = ip;
+    p.port = peer_port;
+    p.online = true;
+    p.last_seen_ms = now_ms();
+  }
+  save_peers();
+}
+
 void LanTalkEngine::accept_loop() {
   while (running_.load()) {
     if (sockets_ == nullptr || sockets_->tcp_listen == kInvalidSocket) {
@@ -736,6 +952,79 @@ void LanTalkEngine::handle_connection(std::intptr_t sock_value, const std::strin
     }
 
     const auto parts = split(frame, '\t');
+    if (parts[0] == "PROBE") {
+      if (parts.size() >= 4) {
+        const auto sender_id = trim(parts[1]);
+        const auto sender_name = b64_decode(parts[2]);
+        std::uint16_t sender_port = 0;
+        parse_u16(parts[3], sender_port);
+
+        if (!sender_id.empty() && sender_id != self_id_) {
+          std::lock_guard<std::mutex> lock(mu_);
+          auto &p = peers_[sender_id];
+          if (p.id.empty()) {
+            p.id = sender_id;
+            p.first_seen_ms = now_ms();
+          }
+          if (!sender_name.empty()) {
+            p.name = sender_name;
+          } else if (p.name.empty()) {
+            p.name = sender_id;
+          }
+          p.ip = source_ip;
+          if (sender_port != 0) {
+            p.port = sender_port;
+          }
+          p.online = true;
+          p.last_seen_ms = now_ms();
+        }
+      }
+
+      std::uint16_t self_port = 0;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (sockets_ != nullptr) {
+          self_port = sockets_->listen_port;
+        }
+      }
+      const auto ack =
+          "PROBE_ACK\t" + self_id_ + "\t" + b64_encode(self_name_) + "\t" + std::to_string(self_port);
+      const auto _ = send_frame(sock, ack);
+      (void)_;
+      save_peers();
+      continue;
+    }
+
+    if (parts[0] == "PROBE_ACK") {
+      if (parts.size() >= 4) {
+        const auto sender_id = trim(parts[1]);
+        const auto sender_name = b64_decode(parts[2]);
+        std::uint16_t sender_port = 0;
+        parse_u16(parts[3], sender_port);
+        if (!sender_id.empty() && sender_id != self_id_) {
+          std::lock_guard<std::mutex> lock(mu_);
+          auto &p = peers_[sender_id];
+          if (p.id.empty()) {
+            p.id = sender_id;
+            p.first_seen_ms = now_ms();
+          }
+          if (!sender_name.empty()) {
+            p.name = sender_name;
+          } else if (p.name.empty()) {
+            p.name = sender_id;
+          }
+          p.ip = source_ip;
+          if (sender_port != 0) {
+            p.port = sender_port;
+          }
+          p.online = true;
+          p.last_seen_ms = now_ms();
+        }
+      }
+      save_peers();
+      continue;
+    }
+
     if (parts.size() < 5 || parts[0] != "MSG") {
       continue;
     }
@@ -1246,6 +1535,34 @@ std::string LanTalkEngine::format_hhmm(std::int64_t ts_ms) {
   std::ostringstream os;
   os << std::put_time(&tmv, "%H:%M");
   return os.str();
+}
+
+std::string LanTalkEngine::primary_ipv4() {
+  socket_t sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (sock == kInvalidSocket) {
+    return "";
+  }
+
+  sockaddr_in remote{};
+  remote.sin_family = AF_INET;
+  remote.sin_port = htons(53);
+  inet_pton(AF_INET, "8.8.8.8", &remote.sin_addr);
+  const auto _ = connect(sock, reinterpret_cast<sockaddr *>(&remote), sizeof(remote));
+  (void)_;
+
+  sockaddr_in local{};
+  socklen_t len = sizeof(local);
+  if (getsockname(sock, reinterpret_cast<sockaddr *>(&local), &len) != 0) {
+    close_socket(sock);
+    return "";
+  }
+  close_socket(sock);
+
+  char ip[64] = {0};
+  if (inet_ntop(AF_INET, &local.sin_addr, ip, sizeof(ip)) == nullptr) {
+    return "";
+  }
+  return ip;
 }
 
 } // namespace lantalk

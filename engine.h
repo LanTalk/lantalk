@@ -56,10 +56,12 @@ private:
   bool start_network(std::string &error);
   void stop_network();
   void discovery_loop();
+  void probe_loop();
   void announce_presence(bool reply_only, const std::string &target_ip = "");
   void consume_presence(const std::string &packet, const std::string &source_ip);
   void accept_loop();
   void handle_connection(std::intptr_t sock, const std::string &source_ip);
+  void probe_target(const std::string &ip, std::uint16_t port);
 
   bool send_text(const std::string &peer_id, const std::string &text, std::string &error);
 
@@ -83,6 +85,7 @@ private:
   static std::string hex_encode(const std::uint8_t *data, std::size_t n);
   static std::int64_t now_ms();
   static std::string format_hhmm(std::int64_t ts_ms);
+  static std::string primary_ipv4();
 
 private:
   mutable std::mutex mu_;
@@ -97,6 +100,7 @@ private:
   std::string active_peer_;
   std::unordered_map<std::string, Peer> peers_;
   std::unordered_map<std::string, std::vector<Message>> messages_;
+  std::size_t probe_cursor_{1};
 
   std::unique_ptr<DataSlotLock> slot_lock_;
   std::unique_ptr<SocketState> sockets_;
