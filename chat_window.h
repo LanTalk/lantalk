@@ -2,8 +2,10 @@
 
 #include "lantalk_core.h"
 
+#include <QEvent>
 #include <QMainWindow>
 #include <QByteArray>
+#include <QPoint>
 #include <QString>
 
 #include <cstdint>
@@ -12,11 +14,13 @@
 class QListWidget;
 class QListWidgetItem;
 class QCloseEvent;
+class QLabel;
 class QPushButton;
 class QToolButton;
 class QTextBrowser;
 class QTextEdit;
 class QTimer;
+class QWidget;
 
 class ChatWindow final : public QMainWindow {
 public:
@@ -25,6 +29,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     struct ChatMessage {
@@ -39,6 +44,7 @@ private:
     struct Contact {
         QString userId;
         QString name;
+        QString remark;
         QString ip;
         bool online = false;
         int unread = 0;
@@ -56,6 +62,7 @@ private:
     void refreshOnlinePeers();
     void rebuildContactList();
     void renderCurrentConversation();
+    void updateChatHeader();
 
     void handleMessageEvent(const MessageEvent& event);
 
@@ -79,6 +86,7 @@ private:
     void saveProfile() const;
     void applySelfAvatar();
     QString localIpSummary() const;
+    QString displayName(const Contact& contact) const;
 
     uint64_t storageSeed() const;
     QByteArray encryptBlob(const QByteArray& plain) const;
@@ -86,6 +94,12 @@ private:
 
     LanTalkApp app_;
     QTimer* refreshTimer_ = nullptr;
+
+    QWidget* titleBar_ = nullptr;
+    QLabel* chatTitleLabel_ = nullptr;
+    QPushButton* minBtn_ = nullptr;
+    QPushButton* maxBtn_ = nullptr;
+    QPushButton* closeBtn_ = nullptr;
 
     QPushButton* selfAvatarBtn_ = nullptr;
     QToolButton* settingsBtn_ = nullptr;
@@ -98,4 +112,7 @@ private:
     std::vector<Contact> contacts_;
     QString activeContactId_;
     QString selfAvatarPath_;
+
+    bool draggingWindow_ = false;
+    QPoint dragOffset_;
 };

@@ -6,23 +6,27 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHostAddress>
 #include <QIcon>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QMouseEvent>
 #include <QNetworkInterface>
 #include <QPainter>
 #include <QPainterPath>
@@ -32,7 +36,6 @@
 #include <QSet>
 #include <QSignalBlocker>
 #include <QStringList>
-#include <QStatusBar>
 #include <QTextBrowser>
 #include <QTextEdit>
 #include <QTimer>
@@ -150,7 +153,7 @@ QIcon makeAppIcon() {
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(29, 78, 216));
-    painter.drawRoundedRect(4, 4, 120, 120, 28, 28);
+    painter.drawRoundedRect(4, 4, 120, 120, 26, 26);
 
     QFont font("Microsoft YaHei UI", 64);
     font.setBold(true);
@@ -205,6 +208,7 @@ ChatWindow::ChatWindow() {
     applySelfAvatar();
     loadContacts();
     refreshOnlinePeers();
+    updateChatHeader();
 
     refreshTimer_ = new QTimer(this);
     refreshTimer_->setInterval(1000);
@@ -225,19 +229,92 @@ void ChatWindow::closeEvent(QCloseEvent* event) {
     event->accept();
 }
 
+bool ChatWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == inputEdit_ && event->type() == QEvent::KeyPress) {
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        const int key = keyEvent->key();
+        if ((key == Qt::Key_Return || key == Qt::Key_Enter) && (keyEvent->modifiers() & Qt::ShiftModifier) == 0) {
+            onSendMessage();
+            return true;
+        }
+    }
+
+    if (watched == titleBar_) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                draggingWindow_ = true;
+                dragOffset_ = mouseEvent->globalPosition().toPoint() - frameGeometry().topLeft();
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseMove) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (draggingWindow_ && (mouseEvent->buttons() & Qt::LeftButton) && !isMaximized()) {
+                move(mouseEvent->globalPosition().toPoint() - dragOffset_);
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseButtonRelease) {
+            draggingWindow_ = false;
+            return true;
+        } else if (event->type() == QEvent::MouseButtonDblClick) {
+            if (isMaximized()) {
+                showNormal();
+            } else {
+                showMaximized();
+            }
+            return true;
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
+}
+
 void ChatWindow::setupUi() {
-    setWindowTitle("LanTalk 局域网聊天");
+    setWindowTitle("LanTalk");
     setWindowIcon(makeAppIcon());
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     resize(1320, 820);
 
     auto* central = new QWidget(this);
-    auto* root = new QHBoxLayout(central);
-    root->setContentsMargins(14, 14, 14, 14);
-    root->setSpacing(14);
+    auto* mainLayout = new QVBoxLayout(central);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setSpacing(0);
 
-    auto* rail = new QFrame(central);
+    titleBar_ = new QFrame(central);
+    titleBar_->setObjectName("TitleBar");
+    titleBar_->setFixedHeight(42);
+    auto* titleLayout = new QHBoxLayout(titleBar_);
+    titleLayout->setContentsMargins(12, 4, 6, 0);
+    titleLayout->setSpacing(8);
+
+    chatTitleLabel_ = new QLabel("聊天窗口", titleBar_);
+    chatTitleLabel_->setObjectName("ChatTitle");
+
+    minBtn_ = new QPushButton("-", titleBar_);
+    minBtn_->setObjectName("WindowBtn");
+    minBtn_->setFixedSize(34, 24);
+
+    maxBtn_ = new QPushButton("口", titleBar_);
+    maxBtn_->setObjectName("WindowBtn");
+    maxBtn_->setFixedSize(34, 24);
+
+    closeBtn_ = new QPushButton("x", titleBar_);
+    closeBtn_->setObjectName("CloseBtn");
+    closeBtn_->setFixedSize(34, 24);
+
+    titleLayout->addWidget(chatTitleLabel_, 1, Qt::AlignVCenter);
+    titleLayout->addWidget(minBtn_, 0, Qt::AlignTop);
+    titleLayout->addWidget(maxBtn_, 0, Qt::AlignTop);
+    titleLayout->addWidget(closeBtn_, 0, Qt::AlignTop);
+
+    auto* body = new QWidget(central);
+    auto* bodyLayout = new QHBoxLayout(body);
+    bodyLayout->setContentsMargins(0, 0, 0, 0);
+    bodyLayout->setSpacing(0);
+
+    auto* rail = new QFrame(body);
     rail->setObjectName("Rail");
-    rail->setFixedWidth(86);
+    rail->setFixedWidth(82);
     auto* railLayout = new QVBoxLayout(rail);
     railLayout->setContentsMargins(10, 12, 10, 12);
     railLayout->setSpacing(10);
@@ -259,43 +336,43 @@ void ChatWindow::setupUi() {
     railLayout->addStretch(1);
     railLayout->addWidget(settingsBtn_, 0, Qt::AlignHCenter | Qt::AlignBottom);
 
-    auto* leftCard = new QFrame(central);
-    leftCard->setObjectName("Card");
-    auto* leftLayout = new QVBoxLayout(leftCard);
-    leftLayout->setContentsMargins(14, 14, 14, 14);
-    leftLayout->setSpacing(10);
+    auto* contactsPane = new QFrame(body);
+    contactsPane->setObjectName("ContactsPane");
+    contactsPane->setFixedWidth(320);
+    auto* leftLayout = new QVBoxLayout(contactsPane);
+    leftLayout->setContentsMargins(12, 12, 12, 12);
+    leftLayout->setSpacing(8);
 
-    auto* title = new QLabel("会话", leftCard);
-    title->setObjectName("Title");
+    auto* sessionLabel = new QLabel("会话", contactsPane);
+    sessionLabel->setObjectName("SectionTitle");
 
-    contactList_ = new QListWidget(leftCard);
-    contactList_->setSpacing(6);
+    contactList_ = new QListWidget(contactsPane);
+    contactList_->setSpacing(4);
     contactList_->setUniformItemSizes(false);
 
-    leftLayout->addWidget(title);
+    leftLayout->addWidget(sessionLabel);
     leftLayout->addWidget(contactList_, 1);
 
-    auto* rightCard = new QFrame(central);
-    rightCard->setObjectName("Card");
-    auto* rightLayout = new QVBoxLayout(rightCard);
-    rightLayout->setContentsMargins(16, 16, 16, 16);
-    rightLayout->setSpacing(10);
+    auto* chatPane = new QFrame(body);
+    chatPane->setObjectName("ChatPane");
+    auto* rightLayout = new QVBoxLayout(chatPane);
+    rightLayout->setContentsMargins(14, 12, 14, 12);
+    rightLayout->setSpacing(8);
 
-    auto* chatTitle = new QLabel("聊天窗口", rightCard);
-    chatTitle->setObjectName("Title");
-
-    conversationView_ = new QTextBrowser(rightCard);
+    conversationView_ = new QTextBrowser(chatPane);
     conversationView_->setOpenExternalLinks(true);
 
     auto* composeRow = new QHBoxLayout();
-    inputEdit_ = new QTextEdit(rightCard);
-    inputEdit_->setPlaceholderText("输入消息...");
+    composeRow->setSpacing(8);
+
+    inputEdit_ = new QTextEdit(chatPane);
+    inputEdit_->setPlaceholderText("输入消息（Enter发送，Shift+Enter换行）");
     inputEdit_->setFixedHeight(96);
 
     auto* buttonCol = new QVBoxLayout();
-    sendBtn_ = new QPushButton("发送", rightCard);
+    sendBtn_ = new QPushButton("发送", chatPane);
     sendBtn_->setObjectName("PrimaryBtn");
-    sendFileBtn_ = new QPushButton("发送文件", rightCard);
+    sendFileBtn_ = new QPushButton("发送文件", chatPane);
     buttonCol->addWidget(sendBtn_);
     buttonCol->addWidget(sendFileBtn_);
     buttonCol->addStretch(1);
@@ -303,56 +380,73 @@ void ChatWindow::setupUi() {
     composeRow->addWidget(inputEdit_, 1);
     composeRow->addLayout(buttonCol);
 
-    rightLayout->addWidget(chatTitle);
     rightLayout->addWidget(conversationView_, 1);
     rightLayout->addLayout(composeRow);
 
-    root->addWidget(rail, 8);
-    root->addWidget(leftCard, 26);
-    root->addWidget(rightCard, 66);
+    bodyLayout->addWidget(rail);
+    bodyLayout->addWidget(contactsPane);
+    bodyLayout->addWidget(chatPane, 1);
+
+    mainLayout->addWidget(titleBar_);
+    mainLayout->addWidget(body, 1);
 
     setCentralWidget(central);
-    statusBar()->hide();
+
+    inputEdit_->installEventFilter(this);
+    titleBar_->installEventFilter(this);
 
     setStyleSheet(R"(
-        QMainWindow { background: #f4f6fa; }
-        QFrame#Rail {
-            background: #0f172a;
-            border-radius: 12px;
+        QMainWindow { background: #f2f4f7; }
+        QFrame#TitleBar {
+            background: #f7f8fa;
+            border-bottom: 1px solid #e5e7eb;
         }
-        QFrame#Card {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-        }
-        QLabel#Title {
-            font-size: 17px;
+        QLabel#ChatTitle {
+            color: #0f172a;
+            font-size: 15px;
             font-weight: 700;
+            padding-left: 4px;
+        }
+        QFrame#Rail {
+            background: #f6f7f9;
+            border-right: 1px solid #e5e7eb;
+        }
+        QFrame#ContactsPane {
+            background: #f9fafb;
+            border-right: 1px solid #e5e7eb;
+        }
+        QFrame#ChatPane {
+            background: #ffffff;
+        }
+        QLabel#SectionTitle {
             color: #111827;
+            font-size: 14px;
+            font-weight: 700;
+            padding-left: 2px;
         }
         QListWidget, QTextBrowser, QTextEdit {
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
             background: #ffffff;
             color: #111827;
             font-size: 13px;
         }
         QListWidget::item {
-            border-radius: 8px;
+            border-radius: 6px;
             padding: 6px;
         }
         QListWidget::item:selected {
-            background: #e0edff;
+            background: #e8f0ff;
             color: #0f172a;
         }
         QPushButton {
-            min-height: 36px;
+            min-height: 34px;
             border: 1px solid #d1d5db;
-            border-radius: 8px;
+            border-radius: 6px;
             background: #ffffff;
             color: #111827;
             font-weight: 600;
-            padding: 0 14px;
+            padding: 0 12px;
         }
         QPushButton:hover { background: #f8fafc; }
         QPushButton#PrimaryBtn {
@@ -367,21 +461,42 @@ void ChatWindow::setupUi() {
             background: transparent;
             padding: 0;
         }
-        QPushButton#AvatarBtn:hover {
-            background: rgba(255,255,255,0.08);
-        }
+        QPushButton#AvatarBtn:hover { background: rgba(0,0,0,0.04); }
         QToolButton#SettingsBtn {
             border: none;
             border-radius: 8px;
-            color: #e2e8f0;
+            color: #334155;
             font-size: 13px;
-            font-weight: 600;
+            font-weight: 700;
             min-width: 56px;
             min-height: 34px;
-            background: rgba(255,255,255,0.06);
+            background: rgba(15,23,42,0.06);
         }
-        QToolButton#SettingsBtn:hover {
-            background: rgba(255,255,255,0.14);
+        QToolButton#SettingsBtn:hover { background: rgba(15,23,42,0.12); }
+        QPushButton#WindowBtn {
+            border: none;
+            border-radius: 4px;
+            background: transparent;
+            color: #334155;
+            font-size: 12px;
+            min-height: 24px;
+            min-width: 34px;
+            padding: 0;
+        }
+        QPushButton#WindowBtn:hover { background: rgba(15,23,42,0.08); }
+        QPushButton#CloseBtn {
+            border: none;
+            border-radius: 4px;
+            background: transparent;
+            color: #334155;
+            font-size: 12px;
+            min-height: 24px;
+            min-width: 34px;
+            padding: 0;
+        }
+        QPushButton#CloseBtn:hover {
+            background: #ef4444;
+            color: #ffffff;
         }
     )");
 }
@@ -392,11 +507,22 @@ void ChatWindow::bindEvents() {
     connect(sendBtn_, &QPushButton::clicked, this, [this]() { onSendMessage(); });
     connect(sendFileBtn_, &QPushButton::clicked, this, [this]() { onSendFile(); });
 
+    connect(minBtn_, &QPushButton::clicked, this, [this]() { showMinimized(); });
+    connect(maxBtn_, &QPushButton::clicked, this, [this]() {
+        if (isMaximized()) {
+            showNormal();
+        } else {
+            showMaximized();
+        }
+    });
+    connect(closeBtn_, &QPushButton::clicked, this, [this]() { close(); });
+
     connect(contactList_, &QListWidget::currentItemChanged, this,
             [this](QListWidgetItem* current, QListWidgetItem*) {
                 if (current == nullptr) {
                     activeContactId_.clear();
                     renderCurrentConversation();
+                    updateChatHeader();
                     return;
                 }
                 activeContactId_ = current->data(Qt::UserRole).toString();
@@ -408,6 +534,7 @@ void ChatWindow::bindEvents() {
                 }
                 rebuildContactList();
                 renderCurrentConversation();
+                updateChatHeader();
             });
 }
 
@@ -454,9 +581,12 @@ void ChatWindow::openSettingsDialog() {
     Config config = app_.configCopy();
     QString selectedAvatar = selfAvatarPath_;
 
+    Contact* contact = findContact(activeContactId_);
+    QString contactRemark = (contact == nullptr) ? QString() : contact->remark;
+
     QDialog dialog(this);
     dialog.setWindowTitle("设置");
-    dialog.resize(420, 360);
+    dialog.resize(430, 390);
 
     auto* root = new QVBoxLayout(&dialog);
     root->setContentsMargins(14, 14, 14, 14);
@@ -479,9 +609,19 @@ void ChatWindow::openSettingsDialog() {
     auto* nicknameEdit = new QLineEdit(QString::fromStdString(config.userName), &dialog);
     form->addRow("昵称", nicknameEdit);
 
+    QLineEdit* remarkEdit = nullptr;
+    if (contact != nullptr) {
+        remarkEdit = new QLineEdit(contactRemark, &dialog);
+        form->addRow("当前会话备注", remarkEdit);
+
+        auto* bindLabel = new QLabel(contact->userId, &dialog);
+        bindLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        form->addRow("备注绑定ID", bindLabel);
+    }
+
     auto* idLabel = new QLabel(QString::fromStdString(config.userId), &dialog);
     idLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    form->addRow("用户ID", idLabel);
+    form->addRow("我的用户ID", idLabel);
 
     auto* ipLabel = new QLabel(localIpSummary(), &dialog);
     ipLabel->setWordWrap(true);
@@ -534,6 +674,17 @@ void ChatWindow::openSettingsDialog() {
     if (!app_.updateLocalUserName(newName.toStdString(), &error)) {
         QMessageBox::warning(this, "提示", QString::fromStdString(error.empty() ? "昵称保存失败。" : error));
         return;
+    }
+
+    if (contact != nullptr && remarkEdit != nullptr) {
+        const QString newRemark = remarkEdit->text().trimmed();
+        if (contact->remark != newRemark) {
+            contact->remark = newRemark;
+            saveContacts();
+            rebuildContactList();
+            renderCurrentConversation();
+            updateChatHeader();
+        }
     }
 
     selfAvatarPath_ = selectedAvatar;
@@ -597,6 +748,7 @@ void ChatWindow::refreshOnlinePeers() {
         saveContacts();
         rebuildContactList();
         renderCurrentConversation();
+        updateChatHeader();
     }
 }
 
@@ -619,7 +771,7 @@ void ChatWindow::rebuildContactList() {
     int activeRow = -1;
     for (int i = 0; i < static_cast<int>(contacts_.size()); ++i) {
         const Contact& contact = contacts_[static_cast<size_t>(i)];
-        QString text = contact.name.isEmpty() ? contact.userId : contact.name;
+        QString text = displayName(contact);
         if (!contact.online) {
             text += "（离线）";
         }
@@ -629,7 +781,12 @@ void ChatWindow::rebuildContactList() {
 
         auto* item = new QListWidgetItem(statusIcon(contact.online), text);
         item->setData(Qt::UserRole, contact.userId);
-        item->setToolTip(QString("用户ID: %1\nIP: %2").arg(contact.userId, contact.ip));
+
+        QString toolTip = QString("用户ID: %1\nIP: %2").arg(contact.userId, contact.ip);
+        if (!contact.remark.isEmpty()) {
+            toolTip += QString("\n备注: %1").arg(contact.remark);
+        }
+        item->setToolTip(toolTip);
         contactList_->addItem(item);
 
         if (!activeContactId_.isEmpty() && contact.userId == activeContactId_) {
@@ -657,10 +814,12 @@ void ChatWindow::renderCurrentConversation() {
         return;
     }
 
+    const QString peerTitle = displayName(*contact);
+
     QString html;
     html += "<html><body style='font-family:Microsoft YaHei UI;font-size:13px;background:#ffffff;'>";
     for (const ChatMessage& message : contact->messages) {
-        const QString sender = message.incoming ? (contact->name.isEmpty() ? QString("对方") : contact->name) : QString("我");
+        const QString sender = message.incoming ? peerTitle : QStringLiteral("我");
         const QString align = message.incoming ? "left" : "right";
         const QString bubbleBg = message.incoming ? "#f3f4f6" : "#dbeafe";
 
@@ -691,6 +850,20 @@ void ChatWindow::renderCurrentConversation() {
     if (QScrollBar* bar = conversationView_->verticalScrollBar()) {
         bar->setValue(bar->maximum());
     }
+}
+
+void ChatWindow::updateChatHeader() {
+    const Contact* contact = findContact(activeContactId_);
+    if (contact == nullptr) {
+        chatTitleLabel_->setText("聊天窗口");
+        return;
+    }
+
+    QString title = QString("与 %1 聊天").arg(displayName(*contact));
+    if (!contact->online) {
+        title += "（离线）";
+    }
+    chatTitleLabel_->setText(title);
 }
 
 void ChatWindow::handleMessageEvent(const MessageEvent& event) {
@@ -732,6 +905,7 @@ void ChatWindow::handleMessageEvent(const MessageEvent& event) {
     saveContacts();
     rebuildContactList();
     renderCurrentConversation();
+    updateChatHeader();
 }
 
 ChatWindow::Contact* ChatWindow::findContact(const QString& userId) {
@@ -867,6 +1041,7 @@ void ChatWindow::loadContacts() {
             continue;
         }
         contact.name = obj.value("name").toString(contact.userId);
+        contact.remark = obj.value("remark").toString();
         contact.ip = obj.value("ip").toString();
         contact.online = false;
         contact.unread = obj.value("unread").toInt(0);
@@ -877,6 +1052,7 @@ void ChatWindow::loadContacts() {
 
     rebuildContactList();
     renderCurrentConversation();
+    updateChatHeader();
 }
 
 void ChatWindow::saveContacts() const {
@@ -887,6 +1063,7 @@ void ChatWindow::saveContacts() const {
         QJsonObject obj;
         obj.insert("user_id", contact.userId);
         obj.insert("name", contact.name);
+        obj.insert("remark", contact.remark);
         obj.insert("ip", contact.ip);
         obj.insert("unread", contact.unread);
         obj.insert("last_seen", static_cast<double>(contact.lastSeenMs));
@@ -983,6 +1160,16 @@ QString ChatWindow::localIpSummary() const {
         return "未检测到";
     }
     return ips.join(" / ");
+}
+
+QString ChatWindow::displayName(const Contact& contact) const {
+    if (!contact.remark.trimmed().isEmpty()) {
+        return contact.remark.trimmed();
+    }
+    if (!contact.name.trimmed().isEmpty()) {
+        return contact.name.trimmed();
+    }
+    return contact.userId;
 }
 
 uint64_t ChatWindow::storageSeed() const {
