@@ -23,6 +23,7 @@ add_executable(lantalk WIN32
   main.cpp
   chat_window.cpp
   chat_window.h
+  resources.qrc
 )
 target_link_libraries(lantalk PRIVATE Qt6::Widgets Qt6::Network ws2_32)
 target_compile_definitions(lantalk PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

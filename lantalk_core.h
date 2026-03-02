@@ -39,6 +39,7 @@ constexpr int kHeartbeatSeconds = 3;
 constexpr int kPeerTimeoutSeconds = 12;
 constexpr uint64_t kMaxTextBytes = 16 * 1024;
 constexpr uint64_t kMaxFileBytes = 1024ULL * 1024ULL * 1024ULL;
+constexpr size_t kMaxAvatarPayloadBytes = 4096;
 constexpr uint64_t kDhPrime = 2305843009213693951ULL;
 constexpr uint64_t kDhGenerator = 5ULL;
 
@@ -50,6 +51,7 @@ enum class PacketType : uint8_t {
 struct Config {
     std::string userName;
     std::string userId;
+    std::string avatarPayload;
     uint16_t listenPort = 39001;
     uint64_t e2eePrivate = 0;
     uint64_t e2eePublic = 0;
@@ -59,6 +61,7 @@ struct Peer {
     std::string userId;
     std::string name;
     std::string ip;
+    std::string avatarPayload;
     uint16_t port = 0;
     uint64_t e2eePublic = 0;
     std::chrono::steady_clock::time_point lastSeen;
@@ -580,6 +583,28 @@ public:
         return true;
     }
 
+    bool updateLocalAvatarPayload(const std::string& avatarPayload, std::string* errorOut = nullptr) {
+        std::string safePayload = sanitizeHelloField(avatarPayload);
+        if (safePayload == "-") {
+            safePayload.clear();
+        }
+        if (safePayload.size() > kMaxAvatarPayloadBytes) {
+            if (errorOut != nullptr) {
+                *errorOut = "头像数据过大。";
+            }
+            return false;
+        }
+        config_.avatarPayload = safePayload;
+        if (!saveConfig()) {
+            if (errorOut != nullptr) {
+                *errorOut = "头像保存失败。";
+            }
+            return false;
+        }
+        broadcastHello();
+        return true;
+    }
+
     Config configCopy() const {
         return config_;
     }
@@ -667,6 +692,8 @@ private:
                         loaded.e2eePublic = parsed;
                         hasE2eePublic = true;
                     }
+                } else if (key == "avatar") {
+                    loaded.avatarPayload = sanitizeHelloField(value);
                 }
             }
         }
@@ -704,6 +731,9 @@ private:
         if (loaded.userId.empty()) {
             loaded.userId = randomHex(rng_, 8);
         }
+        if (loaded.avatarPayload.size() > kMaxAvatarPayloadBytes) {
+            loaded.avatarPayload.clear();
+        }
 
         config_ = loaded;
         return saveConfig();
@@ -720,6 +750,7 @@ private:
         out << "listen_port=" << config_.listenPort << '\n';
         out << "e2ee_private=" << config_.e2eePrivate << '\n';
         out << "e2ee_public=" << config_.e2eePublic << '\n';
+        out << "avatar=" << config_.avatarPayload << '\n';
         return true;
     }
 
@@ -1060,7 +1091,7 @@ private:
             sockaddr_in from{};
             int fromLen = sizeof(from);
 
-            char buffer[512] = {0};
+            char buffer[8192] = {0};
             const int n = recvfrom(udpSock_, buffer, static_cast<int>(sizeof(buffer) - 1), 0,
                                    reinterpret_cast<sockaddr*>(&from), &fromLen);
             if (n <= 0) {
@@ -1069,7 +1100,7 @@ private:
 
             const std::string msg(buffer, buffer + n);
             const auto parts = split(trim(msg), '\t');
-            if (parts.size() != 5 || parts[0] != "HELLO") {
+            if (parts.size() < 5 || parts[0] != "HELLO") {
                 continue;
             }
 
@@ -1093,6 +1124,16 @@ private:
             if (!parseU64Dec(parts[4], peerE2eePublic) || peerE2eePublic <= 1 || peerE2eePublic >= (kDhPrime - 1)) {
                 continue;
             }
+            std::string peerAvatarPayload;
+            if (parts.size() >= 6) {
+                peerAvatarPayload = sanitizeHelloField(parts[5]);
+                if (peerAvatarPayload == "-") {
+                    peerAvatarPayload.clear();
+                }
+                if (peerAvatarPayload.size() > kMaxAvatarPayloadBytes) {
+                    peerAvatarPayload.clear();
+                }
+            }
             if (peerPort <= 0 || peerPort > 65535) {
                 continue;
             }
@@ -1113,6 +1154,7 @@ private:
                     peer.userId = peerUserId;
                     peer.name = peerName;
                     peer.ip = ipBuf;
+                    peer.avatarPayload = peerAvatarPayload;
                     peer.port = static_cast<uint16_t>(peerPort);
                     peer.e2eePublic = peerE2eePublic;
                     peer.lastSeen = std::chrono::steady_clock::now();
@@ -1122,6 +1164,7 @@ private:
                     it->second.userId = peerUserId;
                     it->second.name = peerName;
                     it->second.ip = ipBuf;
+                    it->second.avatarPayload = peerAvatarPayload;
                     it->second.port = static_cast<uint16_t>(peerPort);
                     it->second.e2eePublic = peerE2eePublic;
                     it->second.lastSeen = std::chrono::steady_clock::now();
@@ -1150,8 +1193,10 @@ private:
         if (udpSock_ == kInvalidSocket) {
             return;
         }
+        const std::string avatarPart = config_.avatarPayload.empty() ? "-" : sanitizeHelloField(config_.avatarPayload);
         const std::string payload = "HELLO\t" + config_.userId + "\t" + sanitizeHelloField(config_.userName) + "\t" +
-                                    std::to_string(config_.listenPort) + "\t" + std::to_string(config_.e2eePublic);
+                                    std::to_string(config_.listenPort) + "\t" + std::to_string(config_.e2eePublic) +
+                                    "\t" + avatarPart;
 
         sockaddr_in target{};
         target.sin_family = AF_INET;
