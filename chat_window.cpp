@@ -552,6 +552,7 @@ void ChatWindow::setupUi() {
     sendBtn_ = new QPushButton("发送", chatPane);
     sendBtn_->setObjectName("PrimaryBtn");
     sendFileBtn_ = new QPushButton("发送文件", chatPane);
+    sendFileBtn_->setObjectName("SecondaryFlatBtn");
     buttonCol->addWidget(sendBtn_);
     buttonCol->addWidget(sendFileBtn_);
     buttonCol->addStretch(1);
@@ -576,7 +577,7 @@ void ChatWindow::setupUi() {
     inputEdit_->installEventFilter(this);
 
     setStyleSheet(R"(
-        QMainWindow { background: #f0f3f7; }
+        QMainWindow { background: #eef2f7; }
         QFrame#TitleBar {
             background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #f9fbff,stop:1 #f4f7fb);
             border-bottom: 1px solid #dde3eb;
@@ -596,7 +597,7 @@ void ChatWindow::setupUi() {
             border-right: 1px solid #dde3eb;
         }
         QFrame#ChatPane {
-            background: #ffffff;
+            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #ffffff, stop:1 #fafcff);
         }
         QLabel#SectionTitle {
             color: #111827;
@@ -611,43 +612,51 @@ void ChatWindow::setupUi() {
             font-size: 13px;
         }
         QListWidget::item {
-            border-radius: 8px;
-            padding: 8px 8px;
+            border-radius: 0;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+            padding: 10px 8px;
         }
         QListWidget::item:selected {
-            background: #e8f1ff;
+            background: rgba(59, 130, 246, 0.12);
             color: #0f172a;
         }
         QTextBrowser {
             border: none;
-            border-bottom: 1px solid #e5eaf0;
-            background: #ffffff;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+            background: transparent;
             color: #111827;
             font-size: 13px;
         }
         QTextEdit {
-            border: 1px solid #dde3eb;
-            border-radius: 8px;
-            background: #ffffff;
+            border: none;
+            border-radius: 0;
+            background: transparent;
             color: #111827;
             font-size: 13px;
+            padding: 4px 2px;
         }
         QPushButton {
             min-height: 34px;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
-            background: #ffffff;
+            border: none;
+            border-radius: 0;
+            background: transparent;
             color: #111827;
             font-weight: 600;
             padding: 0 12px;
         }
-        QPushButton:hover { background: #f8fafc; }
+        QPushButton:hover { background: rgba(0, 0, 0, 0.03); }
         QPushButton#PrimaryBtn {
-            background: #2563eb;
-            border: 1px solid #1d4ed8;
-            color: #ffffff;
+            color: #2563eb;
+            font-weight: 700;
         }
-        QPushButton#PrimaryBtn:hover { background: #1d4ed8; }
+        QPushButton#PrimaryBtn:hover { color: #1d4ed8; background: rgba(37, 99, 235, 0.08); }
+        QPushButton#PrimaryBtn:pressed { color: #1e3a8a; background: rgba(37, 99, 235, 0.14); }
+        QPushButton#SecondaryFlatBtn {
+            color: #475569;
+            font-weight: 600;
+        }
+        QPushButton#SecondaryFlatBtn:hover { color: #334155; background: rgba(71, 85, 105, 0.08); }
+        QPushButton#SecondaryFlatBtn:pressed { color: #1f2937; background: rgba(71, 85, 105, 0.14); }
         QPushButton#AvatarBtn {
             border: none;
             border-radius: 28px;
@@ -1107,11 +1116,14 @@ void ChatWindow::renderCurrentConversation() {
     const QString peerTitle = displayName(*contact);
 
     QString html;
-    html += "<html><body style='font-family:Microsoft YaHei UI;font-size:13px;background:#ffffff;'>";
+    html += "<html><body style='font-family:Microsoft YaHei UI;font-size:13px;background:transparent;padding:4px 2px;'>";
     for (const ChatMessage& message : contact->messages) {
         const QString sender = message.incoming ? peerTitle : QStringLiteral("我");
         const QString align = message.incoming ? "left" : "right";
-        const QString bubbleBg = message.incoming ? "#f3f4f6" : "#dbeafe";
+        const QString accent = message.incoming ? "#c7d2e0" : "#93b4ff";
+        const QString edgeStyle = message.incoming
+                                      ? QString("border-left:2px solid %1;padding-left:10px;").arg(accent)
+                                      : QString("border-right:2px solid %1;padding-right:10px;").arg(accent);
 
         QString content;
         if (message.isFile) {
@@ -1127,12 +1139,11 @@ void ChatWindow::renderCurrentConversation() {
         }
 
         html += QString(
-                    "<div style='margin:8px 0;text-align:%1;'>"
-                    "<div style='font-size:11px;color:#6b7280;margin-bottom:4px;'>%2  %3</div>"
-                    "<div style='display:inline-block;max-width:72%%;padding:8px 10px;border-radius:10px;"
-                    "background:%4;color:#0f172a;line-height:1.45;'>%5</div>"
+                    "<div style='margin:10px 0;text-align:%1;'>"
+                    "<div style='font-size:11px;color:#8b95a7;margin-bottom:3px;'>%2  %3</div>"
+                    "<div style='display:inline-block;max-width:74%%;%4color:#0f172a;line-height:1.58;'>%5</div>"
                     "</div>")
-                    .arg(align, htmlEscape(sender), timeText(message.timestampMs), bubbleBg, content);
+                    .arg(align, htmlEscape(sender), timeText(message.timestampMs), edgeStyle, content);
     }
     html += "</body></html>";
 
