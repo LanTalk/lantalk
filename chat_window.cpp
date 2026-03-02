@@ -32,6 +32,7 @@
 #include <QSet>
 #include <QSignalBlocker>
 #include <QStringList>
+#include <QStatusBar>
 #include <QTextBrowser>
 #include <QTextEdit>
 #include <QTimer>
