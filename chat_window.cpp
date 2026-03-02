@@ -306,6 +306,108 @@ void ChatWindow::closeEvent(QCloseEvent* event) {
     event->accept();
 }
 
+void ChatWindow::changeEvent(QEvent* event) {
+    if (event != nullptr && event->type() == QEvent::WindowStateChange && maxBtn_ != nullptr) {
+        maxBtn_->setText(isMaximized() ? QString(QChar(0xE923)) : QString(QChar(0xE922)));
+    }
+    QMainWindow::changeEvent(event);
+}
+
+bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
+#ifdef Q_OS_WIN
+    Q_UNUSED(eventType);
+    MSG* msg = static_cast<MSG*>(message);
+    if (msg != nullptr && msg->message == WM_NCHITTEST) {
+        const POINT cursor{
+            static_cast<short>(LOWORD(msg->lParam)),
+            static_cast<short>(HIWORD(msg->lParam)),
+        };
+        const QPoint globalPos(cursor.x, cursor.y);
+
+        RECT winRect{};
+        ::GetWindowRect(reinterpret_cast<HWND>(winId()), &winRect);
+        const int border = 8;
+
+        if (!isMaximized()) {
+            const bool left = cursor.x >= winRect.left && cursor.x < winRect.left + border;
+            const bool right = cursor.x <= winRect.right && cursor.x > winRect.right - border;
+            const bool top = cursor.y >= winRect.top && cursor.y < winRect.top + border;
+            const bool bottom = cursor.y <= winRect.bottom && cursor.y > winRect.bottom - border;
+            if (left && top) {
+                *result = HTTOPLEFT;
+                return true;
+            }
+            if (right && top) {
+                *result = HTTOPRIGHT;
+                return true;
+            }
+            if (left && bottom) {
+                *result = HTBOTTOMLEFT;
+                return true;
+            }
+            if (right && bottom) {
+                *result = HTBOTTOMRIGHT;
+                return true;
+            }
+            if (left) {
+                *result = HTLEFT;
+                return true;
+            }
+            if (right) {
+                *result = HTRIGHT;
+                return true;
+            }
+            if (top) {
+                *result = HTTOP;
+                return true;
+            }
+            if (bottom) {
+                *result = HTBOTTOM;
+                return true;
+            }
+        }
+
+        auto inWidget = [&](const QWidget* w) -> bool {
+            if (w == nullptr || !w->isVisible()) {
+                return false;
+            }
+            const QRect rect(w->mapToGlobal(QPoint(0, 0)), w->size());
+            return rect.contains(globalPos);
+        };
+
+        if (inWidget(closeBtn_)) {
+            *result = HTCLOSE;
+            return true;
+        }
+        if (inWidget(maxBtn_)) {
+            *result = HTMAXBUTTON;
+            return true;
+        }
+        if (inWidget(minBtn_)) {
+            *result = HTMINBUTTON;
+            return true;
+        }
+
+        if (titleBar_ != nullptr) {
+            const QRect titleRect(titleBar_->mapToGlobal(QPoint(0, 0)), titleBar_->size());
+            if (titleRect.contains(globalPos)) {
+                if (inWidget(viewProfileBtn_)) {
+                    *result = HTCLIENT;
+                    return true;
+                }
+                *result = HTCAPTION;
+                return true;
+            }
+        }
+    }
+#else
+    Q_UNUSED(eventType);
+    Q_UNUSED(message);
+    Q_UNUSED(result);
+#endif
+    return QMainWindow::nativeEvent(eventType, message, result);
+}
+
 bool ChatWindow::eventFilter(QObject* watched, QEvent* event) {
     if (watched == inputEdit_ && event->type() == QEvent::KeyPress) {
         auto* keyEvent = static_cast<QKeyEvent*>(event);
@@ -322,7 +424,7 @@ bool ChatWindow::eventFilter(QObject* watched, QEvent* event) {
 void ChatWindow::setupUi() {
     setWindowTitle("LanTalk");
     setWindowIcon(makeAppIcon());
-    setWindowFlags(Qt::Window);
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     resize(1320, 820);
 
     auto* central = new QWidget(this);
@@ -397,8 +499,24 @@ void ChatWindow::setupUi() {
     titleRight->setContentsMargins(0, 0, 0, 0);
     titleRight->setSpacing(4);
 
-    auto* nativeBtnsPlaceholder = new QWidget(titleBar_);
-    nativeBtnsPlaceholder->setFixedSize(138, 30);
+    auto* controlRow = new QHBoxLayout();
+    controlRow->setContentsMargins(0, 0, 0, 0);
+    controlRow->setSpacing(0);
+
+    auto buildTitleBtn = [&](const QString& glyph) -> QPushButton* {
+        auto* btn = new QPushButton(glyph, titleBar_);
+        btn->setObjectName("TitleCtrlBtn");
+        btn->setFixedSize(46, 30);
+        btn->setCursor(Qt::ArrowCursor);
+        QFont f("Segoe MDL2 Assets", 10);
+        f.setStyleStrategy(QFont::PreferAntialias);
+        btn->setFont(f);
+        return btn;
+    };
+    minBtn_ = buildTitleBtn(QString(QChar(0xE921)));
+    maxBtn_ = buildTitleBtn(QString(QChar(0xE922)));
+    closeBtn_ = buildTitleBtn(QString(QChar(0xE8BB)));
+    closeBtn_->setObjectName("TitleCloseBtn");
 
     viewProfileBtn_ = new QPushButton("查看资料", titleBar_);
     viewProfileBtn_->setObjectName("ProfileBtn");
@@ -406,7 +524,10 @@ void ChatWindow::setupUi() {
     viewProfileBtn_->setFixedHeight(24);
     viewProfileBtn_->setEnabled(false);
 
-    titleRight->addWidget(nativeBtnsPlaceholder, 0, Qt::AlignRight);
+    controlRow->addWidget(minBtn_);
+    controlRow->addWidget(maxBtn_);
+    controlRow->addWidget(closeBtn_);
+    titleRight->addLayout(controlRow);
     titleRight->addWidget(viewProfileBtn_, 0, Qt::AlignRight);
 
     titleLayout->addWidget(chatTitleLabel_, 1, Qt::AlignVCenter);
@@ -545,6 +666,31 @@ void ChatWindow::setupUi() {
             background: rgba(15,23,42,0.06);
         }
         QToolButton#SettingsBtn:hover { background: rgba(15,23,42,0.12); }
+        QPushButton#TitleCtrlBtn {
+            border: none;
+            border-radius: 0;
+            background: transparent;
+            color: #1f2937;
+            min-height: 30px;
+            min-width: 46px;
+            padding: 0;
+        }
+        QPushButton#TitleCtrlBtn:hover {
+            background: #e7ebf1;
+        }
+        QPushButton#TitleCloseBtn {
+            border: none;
+            border-radius: 0;
+            background: transparent;
+            color: #1f2937;
+            min-height: 30px;
+            min-width: 46px;
+            padding: 0;
+        }
+        QPushButton#TitleCloseBtn:hover {
+            background: #e81123;
+            color: #ffffff;
+        }
         QPushButton#ProfileBtn {
             border: 1px solid #d7e0ee;
             border-radius: 8px;
@@ -573,6 +719,19 @@ void ChatWindow::bindEvents() {
     connect(viewProfileBtn_, &QPushButton::clicked, this, [this]() { openContactProfileDialog(); });
     connect(sendBtn_, &QPushButton::clicked, this, [this]() { onSendMessage(); });
     connect(sendFileBtn_, &QPushButton::clicked, this, [this]() { onSendFile(); });
+    connect(minBtn_, &QPushButton::clicked, this, [this]() {
+        ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_MINIMIZE, 0);
+    });
+    connect(maxBtn_, &QPushButton::clicked, this, [this]() {
+        if (isMaximized()) {
+            ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_RESTORE, 0);
+        } else {
+            ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_MAXIMIZE, 0);
+        }
+    });
+    connect(closeBtn_, &QPushButton::clicked, this, [this]() {
+        ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_CLOSE, 0);
+    });
 
     connect(contactList_, &QListWidget::currentItemChanged, this,
             [this](QListWidgetItem* current, QListWidgetItem*) {
