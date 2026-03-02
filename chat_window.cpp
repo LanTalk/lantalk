@@ -670,25 +670,38 @@ void ChatWindow::setupUi() {
             border: none;
             border-radius: 0;
             background: transparent;
-            color: #1f2937;
+            color: #111111;
+            font-family: "Segoe MDL2 Assets";
+            font-size: 10px;
+            font-weight: 400;
             min-height: 30px;
             min-width: 46px;
-            padding: 0;
+            padding: 0 0 1px 0;
         }
         QPushButton#TitleCtrlBtn:hover {
-            background: #e7ebf1;
+            background: rgba(0, 0, 0, 0.07);
+        }
+        QPushButton#TitleCtrlBtn:pressed {
+            background: rgba(0, 0, 0, 0.12);
         }
         QPushButton#TitleCloseBtn {
             border: none;
             border-radius: 0;
             background: transparent;
-            color: #1f2937;
+            color: #111111;
+            font-family: "Segoe MDL2 Assets";
+            font-size: 10px;
+            font-weight: 400;
             min-height: 30px;
             min-width: 46px;
-            padding: 0;
+            padding: 0 0 1px 0;
         }
         QPushButton#TitleCloseBtn:hover {
             background: #e81123;
+            color: #ffffff;
+        }
+        QPushButton#TitleCloseBtn:pressed {
+            background: #c42b1c;
             color: #ffffff;
         }
         QPushButton#ProfileBtn {
