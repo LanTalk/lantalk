@@ -1,6 +1,5 @@
 #include "chat_window.h"
 
-#include <QAction>
 #include <QAbstractSocket>
 #include <QBuffer>
 #include <QCloseEvent>
@@ -14,10 +13,12 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHostAddress>
 #include <QIcon>
 #include <QImage>
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -27,7 +28,6 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
-#include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QNetworkInterface>
@@ -39,6 +39,7 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QSignalBlocker>
+#include <QScreen>
 #include <QStringList>
 #include <QTextBrowser>
 #include <QTextEdit>
@@ -472,14 +473,14 @@ void ChatWindow::setupUi() {
 
     auto* contactsPane = new QFrame(body);
     contactsPane->setObjectName("ContactsPane");
-    contactsPane->setFixedWidth(320);
+    contactsPane->setFixedWidth(286);
     auto* leftLayout = new QVBoxLayout(contactsPane);
-    leftLayout->setContentsMargins(12, 12, 12, 12);
+    leftLayout->setContentsMargins(12, 20, 12, 12);
     leftLayout->setSpacing(8);
 
     searchEdit_ = new QLineEdit(contactsPane);
     searchEdit_->setObjectName("SearchBox");
-    searchEdit_->setPlaceholderText("搜索");
+    searchEdit_->setPlaceholderText("搜索联系人");
     searchEdit_->setClearButtonEnabled(true);
     searchEdit_->setFixedHeight(34);
 
@@ -488,6 +489,7 @@ void ChatWindow::setupUi() {
     contactList_->setUniformItemSizes(false);
     contactList_->setIconSize(QSize(30, 30));
 
+    leftLayout->addSpacing(4);
     leftLayout->addWidget(searchEdit_);
     leftLayout->addWidget(contactList_, 1);
 
@@ -530,9 +532,9 @@ void ChatWindow::setupUi() {
     closeBtn_ = buildTitleBtn(QString(QChar(0xE8BB)));
     closeBtn_->setObjectName("TitleCloseBtn");
 
-    viewProfileBtn_ = new QPushButton(QString(QChar(0xE712)), titleBar_);
+    viewProfileBtn_ = new QPushButton("···", titleBar_);
     viewProfileBtn_->setObjectName("ProfileBtn");
-    QFont profileFont("Segoe MDL2 Assets", 14);
+    QFont profileFont("Microsoft YaHei UI", 13, QFont::DemiBold);
     profileFont.setStyleStrategy(QFont::PreferAntialias);
     viewProfileBtn_->setFont(profileFont);
     viewProfileBtn_->setCursor(Qt::PointingHandCursor);
@@ -575,6 +577,7 @@ void ChatWindow::setupUi() {
     emojiBtn_->setFont(emojiFont);
     emojiBtn_->setCursor(Qt::PointingHandCursor);
     emojiBtn_->setToolTip("表情");
+    emojiBtn_->setFixedSize(38, 34);
 
     sendFileBtn_ = new QPushButton(QString(QChar(0xE898)), composeArea);
     sendFileBtn_->setObjectName("ComposeIconBtn");
@@ -583,6 +586,7 @@ void ChatWindow::setupUi() {
     sendFileBtn_->setFont(fileFont);
     sendFileBtn_->setCursor(Qt::PointingHandCursor);
     sendFileBtn_->setToolTip("发送文件");
+    sendFileBtn_->setFixedSize(38, 34);
 
     toolsRow->addWidget(emojiBtn_);
     toolsRow->addWidget(sendFileBtn_);
@@ -673,7 +677,8 @@ void ChatWindow::setupUi() {
         }
         QListWidget::item:hover { background: rgba(0, 0, 0, 0.03); }
         QListWidget::item:selected {
-            background: #e6eaef;
+            background: rgba(164, 173, 184, 0.23);
+            border: 1px solid rgba(154, 163, 175, 0.30);
             color: #121820;
         }
         QTextBrowser {
@@ -716,16 +721,16 @@ void ChatWindow::setupUi() {
         QPushButton#PrimaryBtn:pressed { background: #059d4f; }
         QPushButton#ComposeIconBtn,
         QToolButton#ComposeIconBtn {
-            min-width: 30px;
-            max-width: 30px;
-            min-height: 28px;
-            max-height: 28px;
+            min-width: 38px;
+            max-width: 38px;
+            min-height: 34px;
+            max-height: 34px;
             border: none;
-            border-radius: 6px;
+            border-radius: 8px;
             color: #4b5563;
             background: transparent;
             font-family: "Segoe MDL2 Assets";
-            font-size: 13px;
+            font-size: 16px;
             padding: 0;
         }
         QPushButton#ComposeIconBtn:hover,
@@ -783,9 +788,9 @@ void ChatWindow::setupUi() {
             color: #374151;
             min-width: 30px;
             min-height: 24px;
-            font-family: "Segoe MDL2 Assets";
-            font-size: 13px;
-            font-weight: 500;
+            font-family: "Microsoft YaHei UI";
+            font-size: 16px;
+            font-weight: 700;
             padding: 0;
         }
         QPushButton#ProfileBtn:hover {
@@ -894,18 +899,105 @@ void ChatWindow::openEmojiMenu() {
         return;
     }
 
-    QMenu menu(this);
+    auto* popup = new QDialog(this, Qt::Popup | Qt::FramelessWindowHint);
+    popup->setAttribute(Qt::WA_DeleteOnClose, true);
+    popup->setObjectName("EmojiPopup");
+    popup->setStyleSheet(R"(
+        QDialog#EmojiPopup {
+            background: #ffffff;
+            border: 1px solid #d8dde5;
+            border-radius: 10px;
+        }
+        QLabel#EmojiTitle {
+            color: #111827;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        QLabel#EmojiHint {
+            color: #6b7280;
+            font-size: 11px;
+        }
+        QToolButton#EmojiCell {
+            border: none;
+            border-radius: 8px;
+            font-size: 18px;
+            background: transparent;
+            min-width: 34px;
+            min-height: 34px;
+            max-width: 34px;
+            max-height: 34px;
+        }
+        QToolButton#EmojiCell:hover { background: #eef2f7; }
+        QToolButton#EmojiCell:pressed { background: #e3e8ef; }
+    )");
+
+    auto* root = new QVBoxLayout(popup);
+    root->setContentsMargins(10, 10, 10, 10);
+    root->setSpacing(8);
+
+    auto* header = new QHBoxLayout();
+    header->setContentsMargins(0, 0, 0, 0);
+    header->setSpacing(6);
+
+    auto* title = new QLabel("常用表情", popup);
+    title->setObjectName("EmojiTitle");
+    auto* hint = new QLabel("点击即可插入", popup);
+    hint->setObjectName("EmojiHint");
+    header->addWidget(title);
+    header->addStretch(1);
+    header->addWidget(hint);
+    root->addLayout(header);
+
+    auto* gridHost = new QWidget(popup);
+    auto* grid = new QGridLayout(gridHost);
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setHorizontalSpacing(4);
+    grid->setVerticalSpacing(4);
+
     const QStringList emojis = {
-        "😀", "😁", "😂", "🤣", "🙂", "😉", "😍", "😘", "😎", "🤔",
-        "😭", "😅", "😴", "😡", "👍", "👋", "👏", "🎉", "❤️", "🔥"};
-    for (const QString& emoji : emojis) {
-        QAction* action = menu.addAction(emoji);
-        connect(action, &QAction::triggered, this, [this, emoji]() {
+        "😀", "😁", "😂", "🤣", "😅", "😊", "🙂", "😉",
+        "😍", "😘", "😎", "🤔", "🤗", "🙃", "😴", "😭",
+        "😤", "😡", "🤯", "🥳", "👍", "👎", "👏", "🙏",
+        "👋", "🤝", "💪", "🎉", "🎁", "✨", "🔥", "❤️",
+        "💯", "🌟", "✅", "❗", "❓", "😮", "🙌", "🤩"};
+    constexpr int kCols = 8;
+    for (int i = 0; i < emojis.size(); ++i) {
+        const QString emoji = emojis.at(i);
+        auto* btn = new QToolButton(gridHost);
+        btn->setObjectName("EmojiCell");
+        btn->setText(emoji);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        connect(btn, &QToolButton::clicked, this, [this, popup, emoji]() {
             inputEdit_->insertPlainText(emoji);
             inputEdit_->setFocus();
+            popup->close();
         });
+        const int row = i / kCols;
+        const int col = i % kCols;
+        grid->addWidget(btn, row, col);
     }
-    menu.exec(emojiBtn_->mapToGlobal(QPoint(0, emojiBtn_->height())));
+    root->addWidget(gridHost);
+    popup->adjustSize();
+
+    QPoint pos = emojiBtn_->mapToGlobal(QPoint(0, emojiBtn_->height() + 6));
+    if (QScreen* screen = QGuiApplication::screenAt(pos)) {
+        const QRect bounds = screen->availableGeometry();
+        if (pos.x() + popup->width() > bounds.right()) {
+            pos.setX(bounds.right() - popup->width());
+        }
+        if (pos.y() + popup->height() > bounds.bottom()) {
+            pos.setY(emojiBtn_->mapToGlobal(QPoint(0, -popup->height() - 6)).y());
+        }
+        if (pos.x() < bounds.left()) {
+            pos.setX(bounds.left());
+        }
+        if (pos.y() < bounds.top()) {
+            pos.setY(bounds.top());
+        }
+    }
+    popup->move(pos);
+    popup->show();
 }
 
 void ChatWindow::openSettingsDialog() {
@@ -1187,10 +1279,11 @@ void ChatWindow::rebuildContactList() {
             toolTip += QString("\n备注: %1").arg(contact.remark);
         }
         item->setToolTip(toolTip);
+        const int insertedRow = contactList_->count();
         contactList_->addItem(item);
 
         if (!activeContactId_.isEmpty() && contact.userId == activeContactId_) {
-            activeRow = i;
+            activeRow = insertedRow;
         }
     }
 
