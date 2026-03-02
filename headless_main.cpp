@@ -1,25 +1,27 @@
-#include "core.h"
+#include "app.h"
 
 #include <iostream>
 #include <string>
 
 int main() {
-  lantalk::AppCore core;
+  lantalk::App app;
   std::string error;
-  if (!core.boot(error)) {
+  if (!app.boot(error)) {
     std::cerr << "boot failed: " << error << std::endl;
     return 1;
   }
 
-  std::cout << "LanTalk headless mode. Commands: bootstrap, snapshot\t<peer>\t<rev>, open\t<peer>, send_text\t<peer>\t<b64>\n";
+  std::cout << "LanTalk headless mode\n";
+  std::cout << "commands: bootstrap | snapshot\\t<peer>\\t<rev> | open\\t<peer> | send\\t<peer>\\t<b64> | set_name\\t<b64>\n";
+
   std::string line;
   while (std::getline(std::cin, line)) {
-    if (line == "quit" || line == "exit") {
+    if (line == "exit" || line == "quit") {
       break;
     }
-    std::cout << core.handle_rpc(line) << std::endl;
+    std::cout << app.rpc(line) << std::endl;
   }
 
-  core.shutdown();
+  app.shutdown();
   return 0;
 }

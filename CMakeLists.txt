@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 cmake_policy(SET CMP0091 NEW)
 
-project(lantalk LANGUAGES C CXX)
+project(lantalk LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,19 +16,14 @@ if(WIN32)
 else()
   set(LANTALK_DESKTOP_DEFAULT OFF)
 endif()
-option(LANTALK_DESKTOP "Build desktop shell with embedded WebView" ${LANTALK_DESKTOP_DEFAULT})
+option(LANTALK_DESKTOP "Build desktop UI shell" ${LANTALK_DESKTOP_DEFAULT})
 
-add_library(lantalk_core
-  core.cpp
-  monocypher.c
-)
-
+add_library(lantalk_core app.cpp)
 target_include_directories(lantalk_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-target_compile_definitions(lantalk_core PRIVATE _CRT_SECURE_NO_WARNINGS)
-
 if(WIN32)
-  target_link_libraries(lantalk_core PUBLIC ws2_32 bcrypt)
+  target_compile_definitions(lantalk_core PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(lantalk_core PUBLIC ws2_32)
 else()
   target_link_libraries(lantalk_core PUBLIC pthread)
 endif()
@@ -44,8 +39,8 @@ if(LANTALK_DESKTOP)
 
   if(WIN32)
     add_executable(lantalk WIN32 main.cpp)
-    target_compile_definitions(lantalk PRIVATE UNICODE _UNICODE)
-    target_link_libraries(lantalk PRIVATE ole32 shell32 comdlg32)
+    target_compile_definitions(lantalk PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+    target_link_libraries(lantalk PRIVATE ole32 shell32)
   else()
     add_executable(lantalk main.cpp)
   endif()
