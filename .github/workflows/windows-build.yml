@@ -17,10 +17,11 @@ jobs:
       - name: Install Qt 6
         uses: jurplel/install-qt-action@v4
         with:
-          version: "6.7.3"
+          version: "6.6.3"
           host: "windows"
           target: "desktop"
-          arch: "win64_msvc2022_64"
+          arch: "win64_msvc2019_64"
+          aqtversion: "==3.2.*"
 
       - name: Configure (x64)
         run: cmake -S . -B build -A x64
