@@ -58,6 +58,7 @@ private:
     void onSendMessage();
     void onSendFile();
     void openSettingsDialog();
+    void openContactProfileDialog();
 
     void refreshOnlinePeers();
     void rebuildContactList();
@@ -100,6 +101,7 @@ private:
     QPushButton* minBtn_ = nullptr;
     QPushButton* maxBtn_ = nullptr;
     QPushButton* closeBtn_ = nullptr;
+    QPushButton* viewProfileBtn_ = nullptr;
 
     QPushButton* selfAvatarBtn_ = nullptr;
     QToolButton* settingsBtn_ = nullptr;
