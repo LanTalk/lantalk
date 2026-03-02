@@ -21,6 +21,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 add_executable(lantalk WIN32 main.cpp)
 target_link_libraries(lantalk PRIVATE Qt6::Widgets ws2_32)
+target_compile_definitions(lantalk PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 
 if(MSVC)
   target_compile_options(lantalk PRIVATE /W4 /permissive-)

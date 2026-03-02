@@ -20,38 +20,17 @@
 #include <thread>
 #include <vector>
 
-#ifndef _WIN32
-#error "LanTalk core supports Windows x64 only."
-#endif
-
-#ifdef _WIN32
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #pragma comment(lib, "Ws2_32.lib")
-#else
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/file.h>
-#include <unistd.h>
-#endif
+
 
 namespace fs = std::filesystem;
 
-#ifdef _WIN32
 using socket_t = SOCKET;
 constexpr socket_t kInvalidSocket = INVALID_SOCKET;
-#else
-using socket_t = int;
-constexpr socket_t kInvalidSocket = -1;
-#endif
+
 
 constexpr uint32_t kPacketMagic = 0x4C414E54;  // "LANT"
 constexpr uint16_t kDiscoveryPort = 37021;
@@ -81,7 +60,6 @@ struct Peer {
 
 class NetworkRuntime {
 public:
-#ifdef _WIN32
     NetworkRuntime() {
         WSADATA wsaData{};
         if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -92,56 +70,30 @@ public:
     ~NetworkRuntime() {
         WSACleanup();
     }
-#else
-    NetworkRuntime() = default;
-    ~NetworkRuntime() = default;
-#endif
+
 };
 
 int getSocketError() {
-#ifdef _WIN32
     return WSAGetLastError();
-#else
-    return errno;
-#endif
+
 }
 
 void closeSocket(socket_t sock) {
-#ifdef _WIN32
     if (sock != INVALID_SOCKET) {
         closesocket(sock);
     }
-#else
-    if (sock >= 0) {
-        close(sock);
-    }
-#endif
+
 }
 
 bool isConnectInProgress(int err) {
-#ifdef _WIN32
     return err == WSAEWOULDBLOCK || err == WSAEINPROGRESS || err == WSAEALREADY;
-#else
-    return err == EINPROGRESS || err == EALREADY || err == EWOULDBLOCK;
-#endif
+
 }
 
 bool setNonBlocking(socket_t sock, bool nonBlocking) {
-#ifdef _WIN32
     u_long mode = nonBlocking ? 1UL : 0UL;
     return ioctlsocket(sock, FIONBIO, &mode) == 0;
-#else
-    int flags = fcntl(sock, F_GETFL, 0);
-    if (flags < 0) {
-        return false;
-    }
-    if (nonBlocking) {
-        flags |= O_NONBLOCK;
-    } else {
-        flags &= ~O_NONBLOCK;
-    }
-    return fcntl(sock, F_SETFL, flags) == 0;
-#endif
+
 }
 
 uint64_t hostToNet64(uint64_t value) {
@@ -299,11 +251,8 @@ std::string sanitizeFileName(std::string fileName) {
 
 std::tm toLocalTime(std::time_t t) {
     std::tm result{};
-#ifdef _WIN32
     localtime_s(&result, &t);
-#else
-    localtime_r(&t, &result);
-#endif
+
     return result;
 }
 
@@ -331,7 +280,6 @@ std::string randomHex(std::mt19937_64& rng, size_t bytes) {
 }
 
 std::string readEnvVar(const char* name) {
-#ifdef _WIN32
     char* raw = nullptr;
     size_t len = 0;
     if (_dupenv_s(&raw, &len, name) != 0 || raw == nullptr) {
@@ -340,10 +288,7 @@ std::string readEnvVar(const char* name) {
     std::string value(raw);
     std::free(raw);
     return value;
-#else
-    const char* value = std::getenv(name);
-    return value != nullptr ? std::string(value) : "";
-#endif
+
 }
 
 uint64_t fnv1a64(const std::string& input) {
@@ -362,7 +307,6 @@ std::string shortHashHex(const std::string& input) {
 }
 
 fs::path getExecutablePath() {
-#ifdef _WIN32
     std::vector<char> buffer(1024, '\0');
     while (true) {
         DWORD copied = GetModuleFileNameA(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -374,19 +318,7 @@ fs::path getExecutablePath() {
         }
         buffer.resize(buffer.size() * 2, '\0');
     }
-#else
-    std::vector<char> buffer(1024, '\0');
-    while (true) {
-        const ssize_t copied = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
-        if (copied < 0) {
-            return fs::path();
-        }
-        if (static_cast<size_t>(copied) < buffer.size() - 1) {
-            return fs::path(std::string(buffer.data(), static_cast<size_t>(copied)));
-        }
-        buffer.resize(buffer.size() * 2, '\0');
-    }
-#endif
+
 }
 
 class LanTalkApp {
@@ -640,7 +572,6 @@ private:
             return true;
         }
 
-#ifdef _WIN32
         std::string lockIdentity = exePath_.string();
         if (lockIdentity.empty()) {
             lockIdentity = (baseDir_ / "lantalk").string();
@@ -657,20 +588,7 @@ private:
             instanceMutex_ = nullptr;
             return false;
         }
-#else
-        lockFilePath_ = dataDir_ / ".instance.lock";
-        lockFd_ = open(lockFilePath_.string().c_str(), O_RDWR | O_CREAT, 0644);
-        if (lockFd_ < 0) {
-            setLastError("Failed to create lock file: " + lockFilePath_.string());
-            return false;
-        }
-        if (flock(lockFd_, LOCK_EX | LOCK_NB) != 0) {
-            setLastError("This executable is already running in current directory.");
-            close(lockFd_);
-            lockFd_ = -1;
-            return false;
-        }
-#endif
+
 
         singleInstanceLocked_ = true;
         return true;
@@ -680,19 +598,12 @@ private:
         if (!singleInstanceLocked_) {
             return;
         }
-#ifdef _WIN32
         if (instanceMutex_ != nullptr) {
             ReleaseMutex(instanceMutex_);
             CloseHandle(instanceMutex_);
             instanceMutex_ = nullptr;
         }
-#else
-        if (lockFd_ >= 0) {
-            flock(lockFd_, LOCK_UN);
-            close(lockFd_);
-            lockFd_ = -1;
-        }
-#endif
+
         singleInstanceLocked_ = false;
     }
 
@@ -965,11 +876,8 @@ private:
             tv.tv_sec = 1;
             tv.tv_usec = 0;
 
-#ifdef _WIN32
             const int rc = select(0, &readSet, nullptr, nullptr, &tv);
-#else
-            const int rc = select(udpSock_ + 1, &readSet, nullptr, nullptr, &tv);
-#endif
+
             if (!running_.load()) {
                 break;
             }
@@ -978,11 +886,8 @@ private:
             }
 
             sockaddr_in from{};
-#ifdef _WIN32
             int fromLen = sizeof(from);
-#else
-            socklen_t fromLen = sizeof(from);
-#endif
+
             char buffer[512] = {0};
             const int n = recvfrom(udpSock_, buffer, static_cast<int>(sizeof(buffer) - 1), 0,
                                    reinterpret_cast<sockaddr*>(&from), &fromLen);
@@ -1113,11 +1018,8 @@ private:
             tv.tv_sec = 1;
             tv.tv_usec = 0;
 
-#ifdef _WIN32
             const int rc = select(0, &readSet, nullptr, nullptr, &tv);
-#else
-            const int rc = select(listenSock_ + 1, &readSet, nullptr, nullptr, &tv);
-#endif
+
             if (!running_.load()) {
                 break;
             }
@@ -1126,11 +1028,8 @@ private:
             }
 
             sockaddr_in remote{};
-#ifdef _WIN32
             int remoteLen = sizeof(remote);
-#else
-            socklen_t remoteLen = sizeof(remote);
-#endif
+
             socket_t client = accept(listenSock_, reinterpret_cast<sockaddr*>(&remote), &remoteLen);
             if (client == kInvalidSocket) {
                 continue;
@@ -1340,22 +1239,16 @@ private:
             timeval tv{};
             tv.tv_sec = timeoutMs / 1000;
             tv.tv_usec = (timeoutMs % 1000) * 1000;
-#ifdef _WIN32
             rc = select(0, nullptr, &writeSet, nullptr, &tv);
-#else
-            rc = select(sock + 1, nullptr, &writeSet, nullptr, &tv);
-#endif
+
             if (rc <= 0) {
                 closeSocket(sock);
                 return kInvalidSocket;
             }
 
             int soError = 0;
-#ifdef _WIN32
             int soLen = sizeof(soError);
-#else
-            socklen_t soLen = sizeof(soError);
-#endif
+
             if (getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &soLen) != 0 || soError != 0) {
                 closeSocket(sock);
                 return kInvalidSocket;
@@ -1545,9 +1438,6 @@ private:
     std::string lastError_;
     bool singleInstanceLocked_ = false;
 
-#ifdef _WIN32
     HANDLE instanceMutex_ = nullptr;
-#else
-    int lockFd_ = -1;
-#endif
+
 };
