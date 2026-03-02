@@ -1,0 +1,40 @@
+name: windows-build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (x64)
+        run: cmake -S . -B build -A x64
+
+      - name: Build Release
+        run: cmake --build build --config Release
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path out -Force | Out-Null
+          if (Test-Path "build/Release/lantalk.exe") {
+            Copy-Item "build/Release/lantalk.exe" "out/LanTalk.exe" -Force
+          } elseif (Test-Path "build/lantalk.exe") {
+            Copy-Item "build/lantalk.exe" "out/LanTalk.exe" -Force
+          } else {
+            throw "lantalk.exe not found"
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanTalk-windows-x64
+          path: out/LanTalk.exe
+          if-no-files-found: error

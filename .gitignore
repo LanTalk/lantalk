@@ -1,12 +1,14 @@
+# build outputs
+build/
 out/
-dist/
-data*/
 *.obj
-*.pdb
-*.ilk
-*.lib
-*.exp
+*.o
 *.exe
-*.dll
-*.user
-*.suo
+*.pdb
+
+# runtime data
+data_*/
+
+# IDE
+.vscode/
+.idea/
