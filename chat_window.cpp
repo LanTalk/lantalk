@@ -43,6 +43,7 @@
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolButton>
+#include <QStyle>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -307,6 +308,13 @@ void ChatWindow::closeEvent(QCloseEvent* event) {
     event->accept();
 }
 
+void ChatWindow::changeEvent(QEvent* event) {
+    if (event != nullptr && event->type() == QEvent::WindowStateChange) {
+        refreshWindowButtons();
+    }
+    QMainWindow::changeEvent(event);
+}
+
 bool ChatWindow::eventFilter(QObject* watched, QEvent* event) {
     if (watched == inputEdit_ && event->type() == QEvent::KeyPress) {
         auto* keyEvent = static_cast<QKeyEvent*>(event);
@@ -336,9 +344,9 @@ bool ChatWindow::eventFilter(QObject* watched, QEvent* event) {
             return true;
         } else if (event->type() == QEvent::MouseButtonDblClick) {
             if (isMaximized()) {
-                showNormal();
+                ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_RESTORE, 0);
             } else {
-                showMaximized();
+                ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_MAXIMIZE, 0);
             }
             return true;
         }
@@ -432,14 +440,17 @@ void ChatWindow::setupUi() {
     minBtn_ = new QPushButton(QString::fromUtf8("−"), titleBar_);
     minBtn_->setObjectName("WindowBtn");
     minBtn_->setFixedSize(46, 30);
+    minBtn_->setText("");
 
     maxBtn_ = new QPushButton(QString::fromUtf8("□"), titleBar_);
     maxBtn_->setObjectName("WindowBtn");
     maxBtn_->setFixedSize(46, 30);
+    maxBtn_->setText("");
 
     closeBtn_ = new QPushButton(QString::fromUtf8("×"), titleBar_);
     closeBtn_->setObjectName("CloseBtn");
     closeBtn_->setFixedSize(46, 30);
+    closeBtn_->setText("");
 
     viewProfileBtn_ = new QPushButton("查看资料", titleBar_);
     viewProfileBtn_->setObjectName("ProfileBtn");
@@ -498,6 +509,7 @@ void ChatWindow::setupUi() {
 
     inputEdit_->installEventFilter(this);
     titleBar_->installEventFilter(this);
+    refreshWindowButtons();
 
     setStyleSheet(R"(
         QMainWindow { background: #f0f3f7; }
@@ -594,9 +606,6 @@ void ChatWindow::setupUi() {
             border: none;
             border-radius: 0;
             background: transparent;
-            color: #1f2937;
-            font-size: 12px;
-            font-family: Segoe UI;
             min-height: 30px;
             min-width: 46px;
             padding: 0;
@@ -606,9 +615,6 @@ void ChatWindow::setupUi() {
             border: none;
             border-radius: 0;
             background: transparent;
-            color: #1f2937;
-            font-size: 12px;
-            font-family: Segoe UI;
             min-height: 30px;
             min-width: 46px;
             padding: 0;
@@ -643,13 +649,16 @@ void ChatWindow::bindEvents() {
     connect(sendBtn_, &QPushButton::clicked, this, [this]() { onSendMessage(); });
     connect(sendFileBtn_, &QPushButton::clicked, this, [this]() { onSendFile(); });
 
-    connect(minBtn_, &QPushButton::clicked, this, [this]() { showMinimized(); });
+    connect(minBtn_, &QPushButton::clicked, this, [this]() {
+        ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_MINIMIZE, 0);
+    });
     connect(maxBtn_, &QPushButton::clicked, this, [this]() {
         if (isMaximized()) {
-            showNormal();
+            ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_RESTORE, 0);
         } else {
-            showMaximized();
+            ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_MAXIMIZE, 0);
         }
+        refreshWindowButtons();
     });
     connect(closeBtn_, &QPushButton::clicked, this, [this]() {
         ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_CLOSE, 0);
@@ -1401,6 +1410,21 @@ void ChatWindow::applySelfAvatar() {
     const QPixmap avatar = makeRoundAvatar(image, 56, seed);
     selfAvatarBtn_->setIcon(QIcon(avatar));
     selfAvatarBtn_->setIconSize(QSize(56, 56));
+}
+
+void ChatWindow::refreshWindowButtons() {
+    if (minBtn_ == nullptr || maxBtn_ == nullptr || closeBtn_ == nullptr) {
+        return;
+    }
+    const int iconSize = 11;
+    minBtn_->setIcon(style()->standardIcon(QStyle::SP_TitleBarMinButton));
+    maxBtn_->setIcon(style()->standardIcon(isMaximized() ? QStyle::SP_TitleBarNormalButton
+                                                          : QStyle::SP_TitleBarMaxButton));
+    closeBtn_->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
+
+    minBtn_->setIconSize(QSize(iconSize, iconSize));
+    maxBtn_->setIconSize(QSize(iconSize, iconSize));
+    closeBtn_->setIconSize(QSize(iconSize, iconSize));
 }
 
 QString ChatWindow::localIpSummary() const {

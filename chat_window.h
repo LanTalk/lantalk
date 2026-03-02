@@ -30,6 +30,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void changeEvent(QEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
@@ -91,6 +92,7 @@ private:
     QByteArray buildAvatarPayload(const QString& avatarPath) const;
     void syncLocalAvatarToNetwork();
     void applySelfAvatar();
+    void refreshWindowButtons();
     QString localIpSummary() const;
     QString displayName(const Contact& contact) const;
 
