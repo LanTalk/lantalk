@@ -19,7 +19,11 @@ set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
-add_executable(lantalk WIN32 main.cpp)
+add_executable(lantalk WIN32
+  main.cpp
+  ui/chat_window.cpp
+  ui/chat_window.h
+)
 target_link_libraries(lantalk PRIVATE Qt6::Widgets ws2_32)
 target_compile_definitions(lantalk PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 

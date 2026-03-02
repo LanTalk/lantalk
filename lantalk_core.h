@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <ctime>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -58,12 +59,24 @@ struct Peer {
     std::chrono::steady_clock::time_point lastSeen;
 };
 
+struct MessageEvent {
+    std::string peerUserId;
+    std::string peerName;
+    std::string peerIp;
+    std::string text;
+    std::string fileName;
+    std::string filePath;
+    bool incoming = false;
+    bool isFile = false;
+    std::time_t timestamp = 0;
+};
+
 class NetworkRuntime {
 public:
     NetworkRuntime() {
         WSADATA wsaData{};
         if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-            throw std::runtime_error("WSAStartup failed");
+            throw std::runtime_error("WinSock 初始化失败。");
         }
     }
 
@@ -73,42 +86,42 @@ public:
 
 };
 
-int getSocketError() {
+inline int getSocketError() {
     return WSAGetLastError();
 
 }
 
-void closeSocket(socket_t sock) {
+inline void closeSocket(socket_t sock) {
     if (sock != INVALID_SOCKET) {
         closesocket(sock);
     }
 
 }
 
-bool isConnectInProgress(int err) {
+inline bool isConnectInProgress(int err) {
     return err == WSAEWOULDBLOCK || err == WSAEINPROGRESS || err == WSAEALREADY;
 
 }
 
-bool setNonBlocking(socket_t sock, bool nonBlocking) {
+inline bool setNonBlocking(socket_t sock, bool nonBlocking) {
     u_long mode = nonBlocking ? 1UL : 0UL;
     return ioctlsocket(sock, FIONBIO, &mode) == 0;
 
 }
 
-uint64_t hostToNet64(uint64_t value) {
+inline uint64_t hostToNet64(uint64_t value) {
     const uint32_t high = htonl(static_cast<uint32_t>(value >> 32));
     const uint32_t low = htonl(static_cast<uint32_t>(value & 0xFFFFFFFFULL));
     return (static_cast<uint64_t>(low) << 32) | high;
 }
 
-uint64_t netToHost64(uint64_t value) {
+inline uint64_t netToHost64(uint64_t value) {
     const uint32_t low = ntohl(static_cast<uint32_t>(value >> 32));
     const uint32_t high = ntohl(static_cast<uint32_t>(value & 0xFFFFFFFFULL));
     return (static_cast<uint64_t>(high) << 32) | low;
 }
 
-bool sendAll(socket_t sock, const void* data, size_t len) {
+inline bool sendAll(socket_t sock, const void* data, size_t len) {
     const char* ptr = static_cast<const char*>(data);
     size_t remaining = len;
     while (remaining > 0) {
@@ -123,7 +136,7 @@ bool sendAll(socket_t sock, const void* data, size_t len) {
     return true;
 }
 
-bool recvAll(socket_t sock, void* data, size_t len) {
+inline bool recvAll(socket_t sock, void* data, size_t len) {
     char* ptr = static_cast<char*>(data);
     size_t remaining = len;
     while (remaining > 0) {
@@ -138,30 +151,30 @@ bool recvAll(socket_t sock, void* data, size_t len) {
     return true;
 }
 
-bool sendU8(socket_t sock, uint8_t value) {
+inline bool sendU8(socket_t sock, uint8_t value) {
     return sendAll(sock, &value, sizeof(value));
 }
 
-bool sendU16(socket_t sock, uint16_t value) {
+inline bool sendU16(socket_t sock, uint16_t value) {
     const uint16_t v = htons(value);
     return sendAll(sock, &v, sizeof(v));
 }
 
-bool sendU32(socket_t sock, uint32_t value) {
+inline bool sendU32(socket_t sock, uint32_t value) {
     const uint32_t v = htonl(value);
     return sendAll(sock, &v, sizeof(v));
 }
 
-bool sendU64(socket_t sock, uint64_t value) {
+inline bool sendU64(socket_t sock, uint64_t value) {
     const uint64_t v = hostToNet64(value);
     return sendAll(sock, &v, sizeof(v));
 }
 
-bool recvU8(socket_t sock, uint8_t& value) {
+inline bool recvU8(socket_t sock, uint8_t& value) {
     return recvAll(sock, &value, sizeof(value));
 }
 
-bool recvU16(socket_t sock, uint16_t& value) {
+inline bool recvU16(socket_t sock, uint16_t& value) {
     uint16_t v = 0;
     if (!recvAll(sock, &v, sizeof(v))) {
         return false;
@@ -170,7 +183,7 @@ bool recvU16(socket_t sock, uint16_t& value) {
     return true;
 }
 
-bool recvU32(socket_t sock, uint32_t& value) {
+inline bool recvU32(socket_t sock, uint32_t& value) {
     uint32_t v = 0;
     if (!recvAll(sock, &v, sizeof(v))) {
         return false;
@@ -179,7 +192,7 @@ bool recvU32(socket_t sock, uint32_t& value) {
     return true;
 }
 
-bool recvU64(socket_t sock, uint64_t& value) {
+inline bool recvU64(socket_t sock, uint64_t& value) {
     uint64_t v = 0;
     if (!recvAll(sock, &v, sizeof(v))) {
         return false;
@@ -188,7 +201,7 @@ bool recvU64(socket_t sock, uint64_t& value) {
     return true;
 }
 
-std::string trim(const std::string& input) {
+inline std::string trim(const std::string& input) {
     size_t start = 0;
     while (start < input.size() && std::isspace(static_cast<unsigned char>(input[start])) != 0) {
         ++start;
@@ -200,7 +213,7 @@ std::string trim(const std::string& input) {
     return input.substr(start, end - start);
 }
 
-std::vector<std::string> split(const std::string& input, char delimiter) {
+inline std::vector<std::string> split(const std::string& input, char delimiter) {
     std::vector<std::string> out;
     std::string current;
     std::istringstream iss(input);
@@ -210,7 +223,7 @@ std::vector<std::string> split(const std::string& input, char delimiter) {
     return out;
 }
 
-std::string stripQuotes(const std::string& input) {
+inline std::string stripQuotes(const std::string& input) {
     if (input.size() >= 2) {
         const char first = input.front();
         const char last = input.back();
@@ -221,7 +234,7 @@ std::string stripQuotes(const std::string& input) {
     return input;
 }
 
-std::string sanitizeHelloField(const std::string& text) {
+inline std::string sanitizeHelloField(const std::string& text) {
     std::string out;
     out.reserve(text.size());
     for (char ch : text) {
@@ -234,7 +247,7 @@ std::string sanitizeHelloField(const std::string& text) {
     return trim(out);
 }
 
-std::string sanitizeFileName(std::string fileName) {
+inline std::string sanitizeFileName(std::string fileName) {
     static const std::string forbidden = "\\/:*?\"<>|";
     for (char& ch : fileName) {
         const unsigned char uch = static_cast<unsigned char>(ch);
@@ -249,25 +262,25 @@ std::string sanitizeFileName(std::string fileName) {
     return fileName;
 }
 
-std::tm toLocalTime(std::time_t t) {
+inline std::tm toLocalTime(std::time_t t) {
     std::tm result{};
     localtime_s(&result, &t);
 
     return result;
 }
 
-std::string formatTime(std::time_t t) {
+inline std::string formatTime(std::time_t t) {
     const std::tm tm = toLocalTime(t);
     std::ostringstream oss;
     oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
     return oss.str();
 }
 
-std::string nowTimeString() {
+inline std::string nowTimeString() {
     return formatTime(std::time(nullptr));
 }
 
-std::string randomHex(std::mt19937_64& rng, size_t bytes) {
+inline std::string randomHex(std::mt19937_64& rng, size_t bytes) {
     static const char* hex = "0123456789abcdef";
     std::string out;
     out.reserve(bytes * 2);
@@ -279,7 +292,7 @@ std::string randomHex(std::mt19937_64& rng, size_t bytes) {
     return out;
 }
 
-std::string readEnvVar(const char* name) {
+inline std::string readEnvVar(const char* name) {
     char* raw = nullptr;
     size_t len = 0;
     if (_dupenv_s(&raw, &len, name) != 0 || raw == nullptr) {
@@ -291,7 +304,7 @@ std::string readEnvVar(const char* name) {
 
 }
 
-uint64_t fnv1a64(const std::string& input) {
+inline uint64_t fnv1a64(const std::string& input) {
     uint64_t hash = 14695981039346656037ULL;
     for (unsigned char ch : input) {
         hash ^= static_cast<uint64_t>(ch);
@@ -300,13 +313,13 @@ uint64_t fnv1a64(const std::string& input) {
     return hash;
 }
 
-std::string shortHashHex(const std::string& input) {
+inline std::string shortHashHex(const std::string& input) {
     std::ostringstream oss;
     oss << std::hex << std::nouppercase << std::setw(8) << std::setfill('0') << (fnv1a64(input) & 0xFFFFFFFFULL);
     return oss.str();
 }
 
-fs::path getExecutablePath() {
+inline fs::path getExecutablePath() {
     std::vector<char> buffer(1024, '\0');
     while (true) {
         DWORD copied = GetModuleFileNameA(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -362,10 +375,10 @@ public:
         discoverySendThread_ = std::thread(&LanTalkApp::discoverySendLoop, this);
         serverThread_ = std::thread(&LanTalkApp::serverLoop, this);
 
-        printLine("LanTalk started.");
-        printLine("Data directory: " + dataDir_.string());
-        printLine("Local user: " + config_.userName + "  UserID: " + config_.userId +
-                  "  Listen: " + std::to_string(config_.listenPort));
+        printLine("LanTalk 已启动。");
+        printLine("数据目录: " + dataDir_.string());
+        printLine("本机用户: " + config_.userName + "  用户ID: " + config_.userId +
+                  "  监听端口: " + std::to_string(config_.listenPort));
         return true;
     }
 
@@ -389,17 +402,26 @@ public:
         Peer peer;
         if (!getPeerByUserId(userId, peer)) {
             if (errorOut != nullptr) {
-                *errorOut = "Peer is offline.";
+                *errorOut = "对方当前不在线。";
             }
             return false;
         }
         if (!sendTextToPeer(peer, text)) {
             if (errorOut != nullptr) {
-                *errorOut = "Failed to send message.";
+                *errorOut = "消息发送失败。";
             }
             return false;
         }
         appendLog("OUT MSG to=" + peer.name + "(" + peer.ip + ") text=" + text);
+        MessageEvent event;
+        event.peerUserId = peer.userId;
+        event.peerName = peer.name;
+        event.peerIp = peer.ip;
+        event.text = text;
+        event.incoming = false;
+        event.isFile = false;
+        event.timestamp = std::time(nullptr);
+        emitMessageEvent(event);
         return true;
     }
 
@@ -407,17 +429,27 @@ public:
         Peer peer;
         if (!getPeerByUserId(userId, peer)) {
             if (errorOut != nullptr) {
-                *errorOut = "Peer is offline.";
+                *errorOut = "对方当前不在线。";
             }
             return false;
         }
         if (!sendFileToPeer(peer, filePath)) {
             if (errorOut != nullptr) {
-                *errorOut = "Failed to send file.";
+                *errorOut = "文件发送失败。";
             }
             return false;
         }
         appendLog("OUT FILE to=" + peer.name + "(" + peer.ip + ") path=" + filePath.string());
+        MessageEvent event;
+        event.peerUserId = peer.userId;
+        event.peerName = peer.name;
+        event.peerIp = peer.ip;
+        event.fileName = filePath.filename().string();
+        event.filePath = filePath.string();
+        event.incoming = false;
+        event.isFile = true;
+        event.timestamp = std::time(nullptr);
+        emitMessageEvent(event);
         return true;
     }
 
@@ -425,19 +457,19 @@ public:
         std::string safeName = sanitizeHelloField(newName);
         if (safeName.empty()) {
             if (errorOut != nullptr) {
-                *errorOut = "Name cannot be empty.";
+                *errorOut = "昵称不能为空。";
             }
             return false;
         }
         config_.userName = safeName;
         if (!saveConfig()) {
             if (errorOut != nullptr) {
-                *errorOut = "Failed to save name.";
+                *errorOut = "昵称保存失败。";
             }
             return false;
         }
         broadcastHello();
-        printLine("Name updated to: " + config_.userName);
+        printLine("昵称已更新为: " + config_.userName);
         return true;
     }
 
@@ -459,12 +491,17 @@ public:
         eventCallback_ = std::move(cb);
     }
 
+    void setMessageCallback(std::function<void(const MessageEvent&)> cb) {
+        std::lock_guard<std::mutex> lock(messageMutex_);
+        messageCallback_ = std::move(cb);
+    }
+
 private:
     bool loadOrCreateConfig() {
         std::error_code ec;
         fs::create_directories(recvDir_, ec);
         if (ec) {
-            setLastError("Failed to create data directory: " + ec.message());
+            setLastError("创建数据目录失败: " + ec.message());
             return false;
         }
 
@@ -542,7 +579,7 @@ private:
     bool saveConfig() {
         std::ofstream out(configPath_, std::ios::trunc);
         if (!out) {
-            setLastError("Failed to write config: " + configPath_.string());
+            setLastError("写入配置失败: " + configPath_.string());
             return false;
         }
         out << "username=" << config_.userName << '\n';
@@ -579,11 +616,11 @@ private:
         std::string mutexName = "LanTalkMutex_" + shortHashHex(lockIdentity);
         instanceMutex_ = CreateMutexA(nullptr, TRUE, mutexName.c_str());
         if (instanceMutex_ == nullptr) {
-            setLastError("Failed to create single-instance mutex.");
+            setLastError("创建单实例锁失败。");
             return false;
         }
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            setLastError("This executable is already running in current directory.");
+            setLastError("当前目录下该程序已在运行。");
             CloseHandle(instanceMutex_);
             instanceMutex_ = nullptr;
             return false;
@@ -610,7 +647,7 @@ private:
     bool initDiscoverySocket() {
         udpSock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (udpSock_ == kInvalidSocket) {
-            setLastError("Failed to create discovery socket.");
+            setLastError("创建局域网发现套接字失败。");
             return false;
         }
 
@@ -624,7 +661,7 @@ private:
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
         if (bind(udpSock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-            setLastError("Failed to bind discovery socket.");
+            setLastError("绑定局域网发现端口失败。");
             closeSocket(udpSock_);
             udpSock_ = kInvalidSocket;
             return false;
@@ -661,7 +698,7 @@ private:
         }
 
         if (chosenSocket == kInvalidSocket) {
-            setLastError("Failed to open TCP listen socket.");
+            setLastError("创建TCP监听端口失败。");
             return false;
         }
 
@@ -950,7 +987,7 @@ private:
                 }
             }
             if (isNew) {
-                printLine("[Peer online] " + peerName + " " + std::string(ipBuf) + ":" + std::to_string(peerPort));
+                printLine("[上线] " + peerName + " " + std::string(ipBuf) + ":" + std::to_string(peerPort));
             }
         }
     }
@@ -1001,7 +1038,7 @@ private:
         }
 
         for (const Peer& peer : removed) {
-            printLine("[Peer offline] " + peer.name + " " + peer.ip);
+            printLine("[离线] " + peer.name + " " + peer.ip);
         }
     }
 
@@ -1296,6 +1333,15 @@ private:
         const std::string stamp = formatTime(sentTime);
         printLine("[" + stamp + "] [MSG] " + fromName + "(" + remoteIp + "): " + text);
         appendLog("IN MSG from=" + fromName + "(" + remoteIp + ") text=" + text);
+        MessageEvent event;
+        event.peerUserId = inferUserIdForIncoming(fromName, remoteIp);
+        event.peerName = fromName;
+        event.peerIp = remoteIp;
+        event.text = text;
+        event.incoming = true;
+        event.isFile = false;
+        event.timestamp = sentTime;
+        emitMessageEvent(event);
     }
 
     void onIncomingFile(const std::string& fromName,
@@ -1309,6 +1355,16 @@ private:
                   " (" + std::to_string(size) + " bytes)");
         appendLog("IN FILE from=" + fromName + "(" + remoteIp + ") name=" + fileName + " save=" + savePath.string() +
                   " bytes=" + std::to_string(size));
+        MessageEvent event;
+        event.peerUserId = inferUserIdForIncoming(fromName, remoteIp);
+        event.peerName = fromName;
+        event.peerIp = remoteIp;
+        event.fileName = fileName;
+        event.filePath = savePath.string();
+        event.incoming = true;
+        event.isFile = true;
+        event.timestamp = sentTime;
+        emitMessageEvent(event);
     }
 
     fs::path uniqueFilePath(const std::string& sender, const std::string& originalName) {
@@ -1378,9 +1434,35 @@ private:
         return true;
     }
 
+    std::string inferUserIdForIncoming(const std::string& fromName, const std::string& remoteIp) {
+        std::lock_guard<std::mutex> lock(peersMutex_);
+        for (const auto& kv : peers_) {
+            if (kv.second.ip == remoteIp && kv.second.name == fromName) {
+                return kv.second.userId;
+            }
+        }
+        for (const auto& kv : peers_) {
+            if (kv.second.ip == remoteIp) {
+                return kv.second.userId;
+            }
+        }
+        return "peer_" + shortHashHex(fromName + "@" + remoteIp);
+    }
+
     void setLastError(const std::string& errorText) {
         std::lock_guard<std::mutex> lock(errorMutex_);
         lastError_ = errorText;
+    }
+
+    void emitMessageEvent(const MessageEvent& event) {
+        std::function<void(const MessageEvent&)> callback;
+        {
+            std::lock_guard<std::mutex> lock(messageMutex_);
+            callback = messageCallback_;
+        }
+        if (callback) {
+            callback(event);
+        }
     }
 
     void appendLog(const std::string& line) {
@@ -1430,11 +1512,13 @@ private:
     std::mutex ioMutex_;
     std::mutex logMutex_;
     std::mutex eventMutex_;
+    std::mutex messageMutex_;
     mutable std::mutex errorMutex_;
 
     std::map<std::string, Peer> peers_;
     std::mt19937_64 rng_;
     std::function<void(const std::string&)> eventCallback_;
+    std::function<void(const MessageEvent&)> messageCallback_;
     std::string lastError_;
     bool singleInstanceLocked_ = false;
 
