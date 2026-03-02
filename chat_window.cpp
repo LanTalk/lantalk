@@ -1,5 +1,6 @@
 #include "chat_window.h"
 
+#include <QAction>
 #include <QAbstractSocket>
 #include <QBuffer>
 #include <QCloseEvent>
@@ -26,6 +27,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QNetworkInterface>
@@ -103,20 +105,21 @@ QPixmap makeDefaultAvatar(const QString& seed, int size) {
     painter.setRenderHint(QPainter::Antialiasing, true);
 
     const QRectF outerRect(1, 1, size - 2.0, size - 2.0);
+    const qreal outerRadius = std::max<qreal>(8.0, size * 0.24);
     QLinearGradient background(0, 0, size, size);
     background.setColorAt(0.0, top);
     background.setColorAt(1.0, bottom);
     painter.setPen(Qt::NoPen);
     painter.setBrush(background);
-    painter.drawEllipse(outerRect);
+    painter.drawRoundedRect(outerRect, outerRadius, outerRadius);
 
     painter.setPen(QPen(QColor(255, 255, 255, 105), std::max(1, size / 24)));
     painter.setBrush(Qt::NoBrush);
-    painter.drawEllipse(outerRect.adjusted(1.0, 1.0, -1.0, -1.0));
+    painter.drawRoundedRect(outerRect.adjusted(1.0, 1.0, -1.0, -1.0), outerRadius - 1.0, outerRadius - 1.0);
 
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(255, 255, 255, 46));
-    painter.drawEllipse(QRectF(size * 0.14, size * 0.10, size * 0.58, size * 0.32));
+    painter.drawRoundedRect(QRectF(size * 0.14, size * 0.10, size * 0.58, size * 0.32), size * 0.14, size * 0.14);
 
     const QColor glyph(255, 255, 255, 225);
     painter.setBrush(glyph);
@@ -149,7 +152,8 @@ QPixmap makeRoundAvatar(const QImage& image, int size, const QString& fallbackSe
     QPainter painter(&pix);
     painter.setRenderHint(QPainter::Antialiasing, true);
     QPainterPath path;
-    path.addEllipse(0, 0, size, size);
+    const qreal radius = std::max<qreal>(7.0, size * 0.22);
+    path.addRoundedRect(QRectF(0, 0, size, size), radius, radius);
     painter.setClipPath(path);
     painter.drawImage(0, 0, scaled);
     return pix;
@@ -448,12 +452,17 @@ void ChatWindow::setupUi() {
     selfAvatarBtn_->setObjectName("AvatarBtn");
     selfAvatarBtn_->setFixedSize(56, 56);
     selfAvatarBtn_->setIconSize(QSize(56, 56));
-    selfAvatarBtn_->setCursor(Qt::PointingHandCursor);
-    selfAvatarBtn_->setToolTip("个人设置");
+    selfAvatarBtn_->setCursor(Qt::ArrowCursor);
+    selfAvatarBtn_->setFocusPolicy(Qt::NoFocus);
+    selfAvatarBtn_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 
     settingsBtn_ = new QToolButton(rail);
     settingsBtn_->setObjectName("SettingsBtn");
-    settingsBtn_->setText("设置");
+    settingsBtn_->setText(QString(QChar(0xE713)));
+    QFont settingsFont("Segoe MDL2 Assets", 15);
+    settingsFont.setStyleStrategy(QFont::PreferAntialias);
+    settingsBtn_->setFont(settingsFont);
+    settingsBtn_->setToolTip("设置");
     settingsBtn_->setCursor(Qt::PointingHandCursor);
     settingsBtn_->setToolButtonStyle(Qt::ToolButtonTextOnly);
 
@@ -468,15 +477,18 @@ void ChatWindow::setupUi() {
     leftLayout->setContentsMargins(12, 12, 12, 12);
     leftLayout->setSpacing(8);
 
-    auto* sessionLabel = new QLabel("会话", contactsPane);
-    sessionLabel->setObjectName("SectionTitle");
+    searchEdit_ = new QLineEdit(contactsPane);
+    searchEdit_->setObjectName("SearchBox");
+    searchEdit_->setPlaceholderText("搜索");
+    searchEdit_->setClearButtonEnabled(true);
+    searchEdit_->setFixedHeight(34);
 
     contactList_ = new QListWidget(contactsPane);
     contactList_->setSpacing(4);
     contactList_->setUniformItemSizes(false);
     contactList_->setIconSize(QSize(30, 30));
 
-    leftLayout->addWidget(sessionLabel);
+    leftLayout->addWidget(searchEdit_);
     leftLayout->addWidget(contactList_, 1);
 
     auto* chatPane = new QFrame(body);
@@ -518,10 +530,14 @@ void ChatWindow::setupUi() {
     closeBtn_ = buildTitleBtn(QString(QChar(0xE8BB)));
     closeBtn_->setObjectName("TitleCloseBtn");
 
-    viewProfileBtn_ = new QPushButton("查看资料", titleBar_);
+    viewProfileBtn_ = new QPushButton(QString(QChar(0xE712)), titleBar_);
     viewProfileBtn_->setObjectName("ProfileBtn");
+    QFont profileFont("Segoe MDL2 Assets", 14);
+    profileFont.setStyleStrategy(QFont::PreferAntialias);
+    viewProfileBtn_->setFont(profileFont);
     viewProfileBtn_->setCursor(Qt::PointingHandCursor);
-    viewProfileBtn_->setFixedHeight(24);
+    viewProfileBtn_->setToolTip("查看资料");
+    viewProfileBtn_->setFixedSize(30, 24);
     viewProfileBtn_->setEnabled(false);
 
     controlRow->addWidget(minBtn_);
@@ -541,27 +557,59 @@ void ChatWindow::setupUi() {
     conversationView_ = new QTextBrowser(chatPane);
     conversationView_->setOpenExternalLinks(true);
 
-    auto* composeRow = new QHBoxLayout();
-    composeRow->setSpacing(8);
+    auto* composeArea = new QWidget(chatPane);
+    composeArea->setObjectName("ComposeArea");
+    auto* composeLayout = new QVBoxLayout(composeArea);
+    composeLayout->setContentsMargins(0, 0, 0, 0);
+    composeLayout->setSpacing(6);
+
+    auto* toolsRow = new QHBoxLayout();
+    toolsRow->setContentsMargins(0, 0, 0, 0);
+    toolsRow->setSpacing(4);
+
+    emojiBtn_ = new QToolButton(composeArea);
+    emojiBtn_->setObjectName("ComposeIconBtn");
+    emojiBtn_->setText(QString(QChar(0xE11D)));
+    QFont emojiFont("Segoe MDL2 Assets", 14);
+    emojiFont.setStyleStrategy(QFont::PreferAntialias);
+    emojiBtn_->setFont(emojiFont);
+    emojiBtn_->setCursor(Qt::PointingHandCursor);
+    emojiBtn_->setToolTip("表情");
+
+    sendFileBtn_ = new QPushButton(QString(QChar(0xE898)), composeArea);
+    sendFileBtn_->setObjectName("ComposeIconBtn");
+    QFont fileFont("Segoe MDL2 Assets", 13);
+    fileFont.setStyleStrategy(QFont::PreferAntialias);
+    sendFileBtn_->setFont(fileFont);
+    sendFileBtn_->setCursor(Qt::PointingHandCursor);
+    sendFileBtn_->setToolTip("发送文件");
+
+    toolsRow->addWidget(emojiBtn_);
+    toolsRow->addWidget(sendFileBtn_);
+    toolsRow->addStretch(1);
+
+    auto* inputRow = new QHBoxLayout();
+    inputRow->setContentsMargins(0, 0, 0, 0);
+    inputRow->setSpacing(8);
 
     inputEdit_ = new QTextEdit(chatPane);
     inputEdit_->setPlaceholderText("输入消息（Enter发送，Shift+Enter换行）");
     inputEdit_->setFixedHeight(96);
+    inputEdit_->setAcceptRichText(false);
 
-    auto* buttonCol = new QVBoxLayout();
     sendBtn_ = new QPushButton("发送", chatPane);
     sendBtn_->setObjectName("PrimaryBtn");
-    sendFileBtn_ = new QPushButton("发送文件", chatPane);
-    sendFileBtn_->setObjectName("SecondaryFlatBtn");
-    buttonCol->addWidget(sendBtn_);
-    buttonCol->addWidget(sendFileBtn_);
-    buttonCol->addStretch(1);
+    sendBtn_->setFixedWidth(82);
+    sendBtn_->setFixedHeight(34);
 
-    composeRow->addWidget(inputEdit_, 1);
-    composeRow->addLayout(buttonCol);
+    inputRow->addWidget(inputEdit_, 1);
+    inputRow->addWidget(sendBtn_, 0, Qt::AlignBottom);
+
+    composeLayout->addLayout(toolsRow);
+    composeLayout->addLayout(inputRow);
 
     rightLayout->addWidget(conversationView_, 1);
-    rightLayout->addLayout(composeRow);
+    rightLayout->addWidget(composeArea);
 
     chatRoot->addWidget(titleBar_);
     chatRoot->addWidget(chatContent, 1);
@@ -577,61 +625,73 @@ void ChatWindow::setupUi() {
     inputEdit_->installEventFilter(this);
 
     setStyleSheet(R"(
-        QMainWindow { background: #eef2f7; }
+        QMainWindow { background: #dcdfe5; }
+        QFrame#Rail {
+            background: #e7eaef;
+            border-right: 1px solid #d3d8e0;
+        }
+        QFrame#ContactsPane {
+            background: #f3f5f8;
+            border-right: 1px solid #d9dee6;
+        }
+        QFrame#ChatPane {
+            background: #f8f9fb;
+        }
         QFrame#TitleBar {
-            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #f9fbff,stop:1 #f4f7fb);
-            border-bottom: 1px solid #dde3eb;
+            background: #f8f9fb;
+            border-bottom: 1px solid #dde2e9;
         }
         QLabel#ChatTitle {
-            color: #0b1220;
+            color: #14181f;
             font-size: 17px;
             font-weight: 700;
             padding-left: 2px;
         }
-        QFrame#Rail {
-            background: #f4f6fa;
-            border-right: 1px solid #dde3eb;
+        QLineEdit#SearchBox {
+            border: 1px solid #d7dce4;
+            border-radius: 8px;
+            background: #eef1f5;
+            color: #1e2430;
+            font-size: 13px;
+            padding: 0 10px;
         }
-        QFrame#ContactsPane {
-            background: #f8fafd;
-            border-right: 1px solid #dde3eb;
-        }
-        QFrame#ChatPane {
-            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #ffffff, stop:1 #fafcff);
-        }
-        QLabel#SectionTitle {
-            color: #111827;
-            font-size: 14px;
-            font-weight: 700;
-            padding-left: 2px;
+        QLineEdit#SearchBox:focus {
+            border-color: #bcc6d3;
+            background: #ffffff;
         }
         QListWidget {
             border: none;
             background: transparent;
-            color: #111827;
+            color: #1e2430;
             font-size: 13px;
         }
         QListWidget::item {
-            border-radius: 0;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+            border: none;
+            border-radius: 8px;
             padding: 10px 8px;
+            margin: 1px 2px;
         }
+        QListWidget::item:hover { background: rgba(0, 0, 0, 0.03); }
         QListWidget::item:selected {
-            background: rgba(59, 130, 246, 0.12);
-            color: #0f172a;
+            background: #e6eaef;
+            color: #121820;
         }
         QTextBrowser {
             border: none;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+            border-bottom: 1px solid #dfe4eb;
             background: transparent;
-            color: #111827;
+            color: #1f2937;
             font-size: 13px;
+        }
+        QWidget#ComposeArea {
+            border-top: 1px solid #dfe4eb;
+            background: transparent;
         }
         QTextEdit {
             border: none;
             border-radius: 0;
             background: transparent;
-            color: #111827;
+            color: #1f2937;
             font-size: 13px;
             padding: 4px 2px;
         }
@@ -644,37 +704,50 @@ void ChatWindow::setupUi() {
             font-weight: 600;
             padding: 0 12px;
         }
-        QPushButton:hover { background: rgba(0, 0, 0, 0.03); }
+        QPushButton:hover { background: rgba(0, 0, 0, 0.04); }
         QPushButton#PrimaryBtn {
-            color: #2563eb;
+            border-radius: 6px;
+            background: #07c160;
+            color: #ffffff;
             font-weight: 700;
+            padding: 0 14px;
         }
-        QPushButton#PrimaryBtn:hover { color: #1d4ed8; background: rgba(37, 99, 235, 0.08); }
-        QPushButton#PrimaryBtn:pressed { color: #1e3a8a; background: rgba(37, 99, 235, 0.14); }
-        QPushButton#SecondaryFlatBtn {
-            color: #475569;
-            font-weight: 600;
+        QPushButton#PrimaryBtn:hover { background: #06b35a; }
+        QPushButton#PrimaryBtn:pressed { background: #059d4f; }
+        QPushButton#ComposeIconBtn,
+        QToolButton#ComposeIconBtn {
+            min-width: 30px;
+            max-width: 30px;
+            min-height: 28px;
+            max-height: 28px;
+            border: none;
+            border-radius: 6px;
+            color: #4b5563;
+            background: transparent;
+            font-family: "Segoe MDL2 Assets";
+            font-size: 13px;
+            padding: 0;
         }
-        QPushButton#SecondaryFlatBtn:hover { color: #334155; background: rgba(71, 85, 105, 0.08); }
-        QPushButton#SecondaryFlatBtn:pressed { color: #1f2937; background: rgba(71, 85, 105, 0.14); }
+        QPushButton#ComposeIconBtn:hover,
+        QToolButton#ComposeIconBtn:hover { background: rgba(0, 0, 0, 0.07); }
+        QPushButton#ComposeIconBtn:pressed,
+        QToolButton#ComposeIconBtn:pressed { background: rgba(0, 0, 0, 0.12); }
         QPushButton#AvatarBtn {
             border: none;
-            border-radius: 28px;
+            border-radius: 14px;
             background: transparent;
             padding: 0;
         }
-        QPushButton#AvatarBtn:hover { background: rgba(0,0,0,0.04); }
         QToolButton#SettingsBtn {
             border: none;
-            border-radius: 8px;
-            color: #334155;
-            font-size: 13px;
-            font-weight: 700;
-            min-width: 56px;
+            border-radius: 10px;
+            color: #4b5563;
+            min-width: 38px;
             min-height: 34px;
-            background: rgba(15,23,42,0.06);
+            background: transparent;
         }
-        QToolButton#SettingsBtn:hover { background: rgba(15,23,42,0.12); }
+        QToolButton#SettingsBtn:hover { background: rgba(0, 0, 0, 0.07); }
+        QToolButton#SettingsBtn:pressed { background: rgba(0, 0, 0, 0.12); }
         QPushButton#TitleCtrlBtn {
             border: none;
             border-radius: 0;
@@ -687,12 +760,8 @@ void ChatWindow::setupUi() {
             min-width: 46px;
             padding: 0 0 1px 0;
         }
-        QPushButton#TitleCtrlBtn:hover {
-            background: rgba(0, 0, 0, 0.07);
-        }
-        QPushButton#TitleCtrlBtn:pressed {
-            background: rgba(0, 0, 0, 0.12);
-        }
+        QPushButton#TitleCtrlBtn:hover { background: rgba(0, 0, 0, 0.07); }
+        QPushButton#TitleCtrlBtn:pressed { background: rgba(0, 0, 0, 0.12); }
         QPushButton#TitleCloseBtn {
             border: none;
             border-radius: 0;
@@ -705,40 +774,39 @@ void ChatWindow::setupUi() {
             min-width: 46px;
             padding: 0 0 1px 0;
         }
-        QPushButton#TitleCloseBtn:hover {
-            background: #e81123;
-            color: #ffffff;
-        }
-        QPushButton#TitleCloseBtn:pressed {
-            background: #c42b1c;
-            color: #ffffff;
-        }
+        QPushButton#TitleCloseBtn:hover { background: #e81123; color: #ffffff; }
+        QPushButton#TitleCloseBtn:pressed { background: #c42b1c; color: #ffffff; }
         QPushButton#ProfileBtn {
-            border: 1px solid #d7e0ee;
-            border-radius: 8px;
-            background: #f6f9ff;
-            color: #1d4ed8;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: #374151;
+            min-width: 30px;
+            min-height: 24px;
+            font-family: "Segoe MDL2 Assets";
             font-size: 13px;
-            font-weight: 600;
-            padding: 0 10px;
+            font-weight: 500;
+            padding: 0;
         }
         QPushButton#ProfileBtn:hover {
-            background: #e9f1ff;
-            border-color: #b9d0f8;
-            color: #1e40af;
+            background: rgba(0, 0, 0, 0.07);
+            color: #111827;
+        }
+        QPushButton#ProfileBtn:pressed {
+            background: rgba(0, 0, 0, 0.12);
+            color: #111827;
         }
         QPushButton#ProfileBtn:disabled {
-            color: #94a3b8;
-            background: #f8fafc;
-            border-color: #e2e8f0;
+            color: #a8afb8;
+            background: transparent;
         }
     )");
 }
 
 void ChatWindow::bindEvents() {
-    connect(selfAvatarBtn_, &QPushButton::clicked, this, [this]() { openSettingsDialog(); });
     connect(settingsBtn_, &QToolButton::clicked, this, [this]() { openSettingsDialog(); });
     connect(viewProfileBtn_, &QPushButton::clicked, this, [this]() { openContactProfileDialog(); });
+    connect(emojiBtn_, &QToolButton::clicked, this, [this]() { openEmojiMenu(); });
     connect(sendBtn_, &QPushButton::clicked, this, [this]() { onSendMessage(); });
     connect(sendFileBtn_, &QPushButton::clicked, this, [this]() { onSendFile(); });
     connect(minBtn_, &QPushButton::clicked, this, [this]() {
@@ -774,6 +842,12 @@ void ChatWindow::bindEvents() {
                 renderCurrentConversation();
                 updateChatHeader();
             });
+
+    connect(searchEdit_, &QLineEdit::textChanged, this, [this]() {
+        rebuildContactList();
+        renderCurrentConversation();
+        updateChatHeader();
+    });
 }
 
 void ChatWindow::onSendMessage() {
@@ -813,6 +887,25 @@ void ChatWindow::onSendFile() {
     if (!app_.sendFileToUserId(userId.toStdString(), fs::path(filePath.toStdString()), &error)) {
         QMessageBox::warning(this, "发送失败", QString::fromStdString(error.empty() ? "文件发送失败。" : error));
     }
+}
+
+void ChatWindow::openEmojiMenu() {
+    if (inputEdit_ == nullptr || emojiBtn_ == nullptr) {
+        return;
+    }
+
+    QMenu menu(this);
+    const QStringList emojis = {
+        "😀", "😁", "😂", "🤣", "🙂", "😉", "😍", "😘", "😎", "🤔",
+        "😭", "😅", "😴", "😡", "👍", "👋", "👏", "🎉", "❤️", "🔥"};
+    for (const QString& emoji : emojis) {
+        QAction* action = menu.addAction(emoji);
+        connect(action, &QAction::triggered, this, [this, emoji]() {
+            inputEdit_->insertPlainText(emoji);
+            inputEdit_->setFocus();
+        });
+    }
+    menu.exec(emojiBtn_->mapToGlobal(QPoint(0, emojiBtn_->height())));
 }
 
 void ChatWindow::openSettingsDialog() {
@@ -1070,10 +1163,18 @@ void ChatWindow::rebuildContactList() {
     const QSignalBlocker blocker(contactList_);
     contactList_->clear();
 
+    const QString keyword = (searchEdit_ == nullptr) ? QString() : searchEdit_->text().trimmed();
     int activeRow = -1;
     for (int i = 0; i < static_cast<int>(contacts_.size()); ++i) {
         const Contact& contact = contacts_[static_cast<size_t>(i)];
-        QString text = displayName(contact);
+        const QString shownName = displayName(contact);
+        if (!keyword.isEmpty()) {
+            const QString haystack = (shownName + "\n" + contact.name + "\n" + contact.remark + "\n" + contact.userId);
+            if (!haystack.contains(keyword, Qt::CaseInsensitive)) {
+                continue;
+            }
+        }
+        QString text = shownName;
         if (contact.unread > 0) {
             text += QString("  [%1]").arg(contact.unread);
         }
@@ -1467,7 +1568,7 @@ QByteArray ChatWindow::buildAvatarPayload(const QString& avatarPath) const {
         QPainter painter(&out);
         painter.setRenderHint(QPainter::Antialiasing, true);
         QPainterPath clip;
-        clip.addEllipse(0, 0, size, size);
+        clip.addRoundedRect(QRectF(0, 0, size, size), 14.0, 14.0);
         painter.setClipPath(clip);
         painter.drawImage(0, 0, scaled);
     }

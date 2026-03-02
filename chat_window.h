@@ -15,6 +15,7 @@ class QListWidget;
 class QListWidgetItem;
 class QCloseEvent;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QToolButton;
 class QTextBrowser;
@@ -60,6 +61,7 @@ private:
 
     void onSendMessage();
     void onSendFile();
+    void openEmojiMenu();
     void openSettingsDialog();
     void openContactProfileDialog();
 
@@ -111,6 +113,8 @@ private:
 
     QPushButton* selfAvatarBtn_ = nullptr;
     QToolButton* settingsBtn_ = nullptr;
+    QToolButton* emojiBtn_ = nullptr;
+    QLineEdit* searchEdit_ = nullptr;
     QListWidget* contactList_ = nullptr;
     QTextBrowser* conversationView_ = nullptr;
     QTextEdit* inputEdit_ = nullptr;
