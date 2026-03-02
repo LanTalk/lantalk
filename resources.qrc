@@ -1,16 +1,16 @@
 <RCC>
   <qresource prefix="/avatars">
-    <file>avatars/default_1.png</file>
-    <file>avatars/default_2.png</file>
-    <file>avatars/default_3.png</file>
-    <file>avatars/default_4.png</file>
-    <file>avatars/default_5.png</file>
-    <file>avatars/default_6.png</file>
-    <file>avatars/default_7.png</file>
-    <file>avatars/default_8.png</file>
-    <file>avatars/default_9.png</file>
-    <file>avatars/default_10.png</file>
-    <file>avatars/default_11.png</file>
-    <file>avatars/default_12.png</file>
+    <file alias="default_1.png">avatars/default_1.png</file>
+    <file alias="default_2.png">avatars/default_2.png</file>
+    <file alias="default_3.png">avatars/default_3.png</file>
+    <file alias="default_4.png">avatars/default_4.png</file>
+    <file alias="default_5.png">avatars/default_5.png</file>
+    <file alias="default_6.png">avatars/default_6.png</file>
+    <file alias="default_7.png">avatars/default_7.png</file>
+    <file alias="default_8.png">avatars/default_8.png</file>
+    <file alias="default_9.png">avatars/default_9.png</file>
+    <file alias="default_10.png">avatars/default_10.png</file>
+    <file alias="default_11.png">avatars/default_11.png</file>
+    <file alias="default_12.png">avatars/default_12.png</file>
   </qresource>
 </RCC>

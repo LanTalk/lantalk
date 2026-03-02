@@ -28,7 +28,6 @@
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QMetaObject>
-#include <QMouseEvent>
 #include <QNetworkInterface>
 #include <QPainter>
 #include <QPainterPath>
@@ -43,7 +42,6 @@
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolButton>
-#include <QStyle>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -308,13 +306,6 @@ void ChatWindow::closeEvent(QCloseEvent* event) {
     event->accept();
 }
 
-void ChatWindow::changeEvent(QEvent* event) {
-    if (event != nullptr && event->type() == QEvent::WindowStateChange) {
-        refreshWindowButtons();
-    }
-    QMainWindow::changeEvent(event);
-}
-
 bool ChatWindow::eventFilter(QObject* watched, QEvent* event) {
     if (watched == inputEdit_ && event->type() == QEvent::KeyPress) {
         auto* keyEvent = static_cast<QKeyEvent*>(event);
@@ -325,40 +316,13 @@ bool ChatWindow::eventFilter(QObject* watched, QEvent* event) {
         }
     }
 
-    if (watched == titleBar_) {
-        if (event->type() == QEvent::MouseButtonPress) {
-            auto* mouseEvent = static_cast<QMouseEvent*>(event);
-            if (mouseEvent->button() == Qt::LeftButton) {
-                draggingWindow_ = true;
-                dragOffset_ = mouseEvent->globalPosition().toPoint() - frameGeometry().topLeft();
-                return true;
-            }
-        } else if (event->type() == QEvent::MouseMove) {
-            auto* mouseEvent = static_cast<QMouseEvent*>(event);
-            if (draggingWindow_ && (mouseEvent->buttons() & Qt::LeftButton) && !isMaximized()) {
-                move(mouseEvent->globalPosition().toPoint() - dragOffset_);
-                return true;
-            }
-        } else if (event->type() == QEvent::MouseButtonRelease) {
-            draggingWindow_ = false;
-            return true;
-        } else if (event->type() == QEvent::MouseButtonDblClick) {
-            if (isMaximized()) {
-                ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_RESTORE, 0);
-            } else {
-                ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_MAXIMIZE, 0);
-            }
-            return true;
-        }
-    }
-
     return QMainWindow::eventFilter(watched, event);
 }
 
 void ChatWindow::setupUi() {
     setWindowTitle("LanTalk");
     setWindowIcon(makeAppIcon());
-    setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+    setWindowFlags(Qt::Window);
     resize(1320, 820);
 
     auto* central = new QWidget(this);
@@ -433,24 +397,8 @@ void ChatWindow::setupUi() {
     titleRight->setContentsMargins(0, 0, 0, 0);
     titleRight->setSpacing(4);
 
-    auto* controlRow = new QHBoxLayout();
-    controlRow->setContentsMargins(0, 0, 0, 0);
-    controlRow->setSpacing(0);
-
-    minBtn_ = new QPushButton(QString::fromUtf8("−"), titleBar_);
-    minBtn_->setObjectName("WindowBtn");
-    minBtn_->setFixedSize(46, 30);
-    minBtn_->setText("");
-
-    maxBtn_ = new QPushButton(QString::fromUtf8("□"), titleBar_);
-    maxBtn_->setObjectName("WindowBtn");
-    maxBtn_->setFixedSize(46, 30);
-    maxBtn_->setText("");
-
-    closeBtn_ = new QPushButton(QString::fromUtf8("×"), titleBar_);
-    closeBtn_->setObjectName("CloseBtn");
-    closeBtn_->setFixedSize(46, 30);
-    closeBtn_->setText("");
+    auto* nativeBtnsPlaceholder = new QWidget(titleBar_);
+    nativeBtnsPlaceholder->setFixedSize(138, 30);
 
     viewProfileBtn_ = new QPushButton("查看资料", titleBar_);
     viewProfileBtn_->setObjectName("ProfileBtn");
@@ -458,10 +406,7 @@ void ChatWindow::setupUi() {
     viewProfileBtn_->setFixedHeight(24);
     viewProfileBtn_->setEnabled(false);
 
-    controlRow->addWidget(minBtn_);
-    controlRow->addWidget(maxBtn_);
-    controlRow->addWidget(closeBtn_);
-    titleRight->addLayout(controlRow);
+    titleRight->addWidget(nativeBtnsPlaceholder, 0, Qt::AlignRight);
     titleRight->addWidget(viewProfileBtn_, 0, Qt::AlignRight);
 
     titleLayout->addWidget(chatTitleLabel_, 1, Qt::AlignVCenter);
@@ -508,8 +453,6 @@ void ChatWindow::setupUi() {
     setCentralWidget(central);
 
     inputEdit_->installEventFilter(this);
-    titleBar_->installEventFilter(this);
-    refreshWindowButtons();
 
     setStyleSheet(R"(
         QMainWindow { background: #f0f3f7; }
@@ -602,42 +545,24 @@ void ChatWindow::setupUi() {
             background: rgba(15,23,42,0.06);
         }
         QToolButton#SettingsBtn:hover { background: rgba(15,23,42,0.12); }
-        QPushButton#WindowBtn {
-            border: none;
-            border-radius: 0;
-            background: transparent;
-            min-height: 30px;
-            min-width: 46px;
-            padding: 0;
-        }
-        QPushButton#WindowBtn:hover { background: #e7ebf1; }
-        QPushButton#CloseBtn {
-            border: none;
-            border-radius: 0;
-            background: transparent;
-            min-height: 30px;
-            min-width: 46px;
-            padding: 0;
-        }
-        QPushButton#CloseBtn:hover {
-            background: #e81123;
-            color: #ffffff;
-        }
         QPushButton#ProfileBtn {
-            border: none;
-            background: transparent;
+            border: 1px solid #d7e0ee;
+            border-radius: 8px;
+            background: #f6f9ff;
             color: #1d4ed8;
-            font-size: 12px;
+            font-size: 13px;
             font-weight: 600;
-            min-height: 22px;
-            padding: 0 6px;
+            padding: 0 10px;
         }
         QPushButton#ProfileBtn:hover {
+            background: #e9f1ff;
+            border-color: #b9d0f8;
             color: #1e40af;
-            text-decoration: underline;
         }
         QPushButton#ProfileBtn:disabled {
             color: #94a3b8;
+            background: #f8fafc;
+            border-color: #e2e8f0;
         }
     )");
 }
@@ -648,21 +573,6 @@ void ChatWindow::bindEvents() {
     connect(viewProfileBtn_, &QPushButton::clicked, this, [this]() { openContactProfileDialog(); });
     connect(sendBtn_, &QPushButton::clicked, this, [this]() { onSendMessage(); });
     connect(sendFileBtn_, &QPushButton::clicked, this, [this]() { onSendFile(); });
-
-    connect(minBtn_, &QPushButton::clicked, this, [this]() {
-        ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_MINIMIZE, 0);
-    });
-    connect(maxBtn_, &QPushButton::clicked, this, [this]() {
-        if (isMaximized()) {
-            ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_RESTORE, 0);
-        } else {
-            ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_MAXIMIZE, 0);
-        }
-        refreshWindowButtons();
-    });
-    connect(closeBtn_, &QPushButton::clicked, this, [this]() {
-        ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_CLOSE, 0);
-    });
 
     connect(contactList_, &QListWidget::currentItemChanged, this,
             [this](QListWidgetItem* current, QListWidgetItem*) {
@@ -1410,21 +1320,6 @@ void ChatWindow::applySelfAvatar() {
     const QPixmap avatar = makeRoundAvatar(image, 56, seed);
     selfAvatarBtn_->setIcon(QIcon(avatar));
     selfAvatarBtn_->setIconSize(QSize(56, 56));
-}
-
-void ChatWindow::refreshWindowButtons() {
-    if (minBtn_ == nullptr || maxBtn_ == nullptr || closeBtn_ == nullptr) {
-        return;
-    }
-    const int iconSize = 11;
-    minBtn_->setIcon(style()->standardIcon(QStyle::SP_TitleBarMinButton));
-    maxBtn_->setIcon(style()->standardIcon(isMaximized() ? QStyle::SP_TitleBarNormalButton
-                                                          : QStyle::SP_TitleBarMaxButton));
-    closeBtn_->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
-
-    minBtn_->setIconSize(QSize(iconSize, iconSize));
-    maxBtn_->setIconSize(QSize(iconSize, iconSize));
-    closeBtn_->setIconSize(QSize(iconSize, iconSize));
 }
 
 QString ChatWindow::localIpSummary() const {
