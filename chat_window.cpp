@@ -1,14 +1,19 @@
 #include "chat_window.h"
 
+#include <QAbstractSocket>
 #include <QCloseEvent>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -18,22 +23,29 @@
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QNetworkInterface>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
+#include <QRandomGenerator>
 #include <QScrollBar>
 #include <QSet>
 #include <QSignalBlocker>
-#include <QStatusBar>
+#include <QStringList>
 #include <QTextBrowser>
 #include <QTextEdit>
 #include <QTimer>
+#include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace {
 QIcon statusIcon(bool online) {
@@ -83,23 +95,95 @@ qint64 lastMessageTs(const ContactLike& contact) {
     }
     return contact.messages.back().timestampMs;
 }
+
+QPixmap makeDefaultAvatar(const QString& seed, int size) {
+    QPixmap pix(size, size);
+    pix.fill(Qt::transparent);
+
+    const uint32_t hash = qHash(seed.isEmpty() ? QStringLiteral("L") : seed);
+    const int hue = static_cast<int>(hash % 360U);
+    const QColor bg = QColor::fromHsl(hue, 140, 145);
+    const QString letter = seed.isEmpty() ? QStringLiteral("L") : QString(seed.front()).toUpper();
+
+    QPainter painter(&pix);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(bg);
+    painter.drawEllipse(0, 0, size, size);
+
+    QFont font("Microsoft YaHei UI", static_cast<int>(size * 0.38));
+    font.setBold(true);
+    painter.setFont(font);
+    painter.setPen(Qt::white);
+    painter.drawText(QRect(0, 0, size, size), Qt::AlignCenter, letter);
+    return pix;
+}
+
+QPixmap makeRoundAvatar(const QImage& image, int size, const QString& fallbackSeed) {
+    if (image.isNull()) {
+        return makeDefaultAvatar(fallbackSeed, size);
+    }
+
+    QImage scaled = image.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    if (scaled.isNull()) {
+        return makeDefaultAvatar(fallbackSeed, size);
+    }
+
+    QPixmap pix(size, size);
+    pix.fill(Qt::transparent);
+
+    QPainter painter(&pix);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QPainterPath path;
+    path.addEllipse(0, 0, size, size);
+    painter.setClipPath(path);
+    painter.drawImage(0, 0, scaled);
+    return pix;
+}
+
+QIcon makeAppIcon() {
+    QPixmap pix(128, 128);
+    pix.fill(Qt::transparent);
+
+    QPainter painter(&pix);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(29, 78, 216));
+    painter.drawRoundedRect(4, 4, 120, 120, 28, 28);
+
+    QFont font("Microsoft YaHei UI", 64);
+    font.setBold(true);
+    painter.setFont(font);
+    painter.setPen(Qt::white);
+    painter.drawText(QRect(0, 0, 128, 128), Qt::AlignCenter, QStringLiteral("L"));
+    return QIcon(pix);
+}
+
+constexpr char kBlobMagic[] = "LTC2";
+
+QByteArray nonceToBytes(uint64_t nonce) {
+    QByteArray out;
+    out.resize(8);
+    for (int i = 0; i < 8; ++i) {
+        out[i] = static_cast<char>((nonce >> (i * 8U)) & 0xFFU);
+    }
+    return out;
+}
+
+uint64_t bytesToNonce(const QByteArray& in, int offset) {
+    uint64_t value = 0;
+    for (int i = 0; i < 8; ++i) {
+        value |= static_cast<uint64_t>(static_cast<uint8_t>(in[offset + i])) << (i * 8U);
+    }
+    return value;
+}
 }  // namespace
 
 ChatWindow::ChatWindow() {
     setupUi();
     bindEvents();
-    loadContacts();
 
-    app_.setEventCallback([this](const std::string& line) {
-        const QString text = QString::fromStdString(line);
-        QMetaObject::invokeMethod(
-            this,
-            [this, text]() {
-                statusBar()->showMessage(text, 2500);
-            },
-            Qt::QueuedConnection);
-    });
-
+    app_.setEventCallback([](const std::string&) {});
     app_.setMessageCallback([this](const MessageEvent& event) {
         QMetaObject::invokeMethod(
             this,
@@ -116,15 +200,14 @@ ChatWindow::ChatWindow() {
         throw std::runtime_error("网络服务启动失败。");
     }
 
-    updateStatusBar();
+    loadProfile();
+    applySelfAvatar();
+    loadContacts();
     refreshOnlinePeers();
 
     refreshTimer_ = new QTimer(this);
     refreshTimer_->setInterval(1000);
-    connect(refreshTimer_, &QTimer::timeout, this, [this]() {
-        refreshOnlinePeers();
-        updateStatusBar();
-    });
+    connect(refreshTimer_, &QTimer::timeout, this, [this]() { refreshOnlinePeers(); });
     refreshTimer_->start();
 }
 
@@ -143,12 +226,37 @@ void ChatWindow::closeEvent(QCloseEvent* event) {
 
 void ChatWindow::setupUi() {
     setWindowTitle("LanTalk 局域网聊天");
-    resize(1280, 800);
+    setWindowIcon(makeAppIcon());
+    resize(1320, 820);
 
     auto* central = new QWidget(this);
     auto* root = new QHBoxLayout(central);
     root->setContentsMargins(14, 14, 14, 14);
     root->setSpacing(14);
+
+    auto* rail = new QFrame(central);
+    rail->setObjectName("Rail");
+    rail->setFixedWidth(86);
+    auto* railLayout = new QVBoxLayout(rail);
+    railLayout->setContentsMargins(10, 12, 10, 12);
+    railLayout->setSpacing(10);
+
+    selfAvatarBtn_ = new QPushButton(rail);
+    selfAvatarBtn_->setObjectName("AvatarBtn");
+    selfAvatarBtn_->setFixedSize(56, 56);
+    selfAvatarBtn_->setIconSize(QSize(56, 56));
+    selfAvatarBtn_->setCursor(Qt::PointingHandCursor);
+    selfAvatarBtn_->setToolTip("个人设置");
+
+    settingsBtn_ = new QToolButton(rail);
+    settingsBtn_->setObjectName("SettingsBtn");
+    settingsBtn_->setText("设置");
+    settingsBtn_->setCursor(Qt::PointingHandCursor);
+    settingsBtn_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+
+    railLayout->addWidget(selfAvatarBtn_, 0, Qt::AlignHCenter | Qt::AlignTop);
+    railLayout->addStretch(1);
+    railLayout->addWidget(settingsBtn_, 0, Qt::AlignHCenter | Qt::AlignBottom);
 
     auto* leftCard = new QFrame(central);
     leftCard->setObjectName("Card");
@@ -172,17 +280,8 @@ void ChatWindow::setupUi() {
     rightLayout->setContentsMargins(16, 16, 16, 16);
     rightLayout->setSpacing(10);
 
-    auto* topRow = new QHBoxLayout();
-    auto* nameLabel = new QLabel("我的昵称", rightCard);
-    nameLabel->setObjectName("Label");
-    nameEdit_ = new QLineEdit(rightCard);
-    nameEdit_->setPlaceholderText("输入昵称");
-    renameBtn_ = new QPushButton("保存昵称", rightCard);
-    renameBtn_->setObjectName("PrimaryBtn");
-
-    topRow->addWidget(nameLabel);
-    topRow->addWidget(nameEdit_, 1);
-    topRow->addWidget(renameBtn_);
+    auto* chatTitle = new QLabel("聊天窗口", rightCard);
+    chatTitle->setObjectName("Title");
 
     conversationView_ = new QTextBrowser(rightCard);
     conversationView_->setOpenExternalLinks(true);
@@ -203,34 +302,34 @@ void ChatWindow::setupUi() {
     composeRow->addWidget(inputEdit_, 1);
     composeRow->addLayout(buttonCol);
 
-    rightLayout->addLayout(topRow);
+    rightLayout->addWidget(chatTitle);
     rightLayout->addWidget(conversationView_, 1);
     rightLayout->addLayout(composeRow);
 
-    root->addWidget(leftCard, 32);
-    root->addWidget(rightCard, 68);
+    root->addWidget(rail, 8);
+    root->addWidget(leftCard, 26);
+    root->addWidget(rightCard, 66);
 
     setCentralWidget(central);
-    statusBar()->showMessage("准备就绪");
+    statusBar()->hide();
 
     setStyleSheet(R"(
         QMainWindow { background: #f4f6fa; }
+        QFrame#Rail {
+            background: #0f172a;
+            border-radius: 12px;
+        }
         QFrame#Card {
             background: #ffffff;
             border: 1px solid #e5e7eb;
             border-radius: 12px;
         }
         QLabel#Title {
-            font-size: 18px;
+            font-size: 17px;
             font-weight: 700;
             color: #111827;
         }
-        QLabel#Label {
-            font-size: 13px;
-            font-weight: 600;
-            color: #374151;
-        }
-        QListWidget, QTextBrowser, QLineEdit, QTextEdit {
+        QListWidget, QTextBrowser, QTextEdit {
             border: 1px solid #d1d5db;
             border-radius: 8px;
             background: #ffffff;
@@ -261,19 +360,34 @@ void ChatWindow::setupUi() {
             color: #ffffff;
         }
         QPushButton#PrimaryBtn:hover { background: #1d4ed8; }
-        QStatusBar {
-            background: #ffffff;
-            border-top: 1px solid #e5e7eb;
-            color: #4b5563;
+        QPushButton#AvatarBtn {
+            border: none;
+            border-radius: 28px;
+            background: transparent;
+            padding: 0;
+        }
+        QPushButton#AvatarBtn:hover {
+            background: rgba(255,255,255,0.08);
+        }
+        QToolButton#SettingsBtn {
+            border: none;
+            border-radius: 8px;
+            color: #e2e8f0;
+            font-size: 13px;
+            font-weight: 600;
+            min-width: 56px;
+            min-height: 34px;
+            background: rgba(255,255,255,0.06);
+        }
+        QToolButton#SettingsBtn:hover {
+            background: rgba(255,255,255,0.14);
         }
     )");
-
-    const Config config = app_.configCopy();
-    nameEdit_->setText(QString::fromStdString(config.userName));
 }
 
 void ChatWindow::bindEvents() {
-    connect(renameBtn_, &QPushButton::clicked, this, [this]() { onRename(); });
+    connect(selfAvatarBtn_, &QPushButton::clicked, this, [this]() { openSettingsDialog(); });
+    connect(settingsBtn_, &QToolButton::clicked, this, [this]() { openSettingsDialog(); });
     connect(sendBtn_, &QPushButton::clicked, this, [this]() { onSendMessage(); });
     connect(sendFileBtn_, &QPushButton::clicked, this, [this]() { onSendFile(); });
 
@@ -294,23 +408,6 @@ void ChatWindow::bindEvents() {
                 rebuildContactList();
                 renderCurrentConversation();
             });
-}
-
-void ChatWindow::onRename() {
-    const QString newName = nameEdit_->text().trimmed();
-    if (newName.isEmpty()) {
-        QMessageBox::warning(this, "提示", "昵称不能为空。");
-        return;
-    }
-
-    std::string error;
-    if (!app_.updateLocalUserName(newName.toStdString(), &error)) {
-        QMessageBox::warning(this, "提示", QString::fromStdString(error.empty() ? "昵称保存失败。" : error));
-        return;
-    }
-
-    updateStatusBar();
-    statusBar()->showMessage("昵称已更新", 2000);
 }
 
 void ChatWindow::onSendMessage() {
@@ -349,8 +446,98 @@ void ChatWindow::onSendFile() {
     std::string error;
     if (!app_.sendFileToUserId(userId.toStdString(), fs::path(filePath.toStdString()), &error)) {
         QMessageBox::warning(this, "发送失败", QString::fromStdString(error.empty() ? "文件发送失败。" : error));
+    }
+}
+
+void ChatWindow::openSettingsDialog() {
+    Config config = app_.configCopy();
+    QString selectedAvatar = selfAvatarPath_;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("设置");
+    dialog.resize(420, 360);
+
+    auto* root = new QVBoxLayout(&dialog);
+    root->setContentsMargins(14, 14, 14, 14);
+    root->setSpacing(12);
+
+    auto* avatarRow = new QHBoxLayout();
+    auto* avatarLabel = new QLabel(&dialog);
+    avatarLabel->setFixedSize(72, 72);
+    avatarLabel->setPixmap(makeRoundAvatar(QImage(selectedAvatar), 72, QString::fromStdString(config.userId)));
+
+    auto* pickAvatarBtn = new QPushButton("更换头像", &dialog);
+    avatarRow->addWidget(avatarLabel, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    avatarRow->addWidget(pickAvatarBtn, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    avatarRow->addStretch(1);
+
+    auto* form = new QFormLayout();
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
+
+    auto* nicknameEdit = new QLineEdit(QString::fromStdString(config.userName), &dialog);
+    form->addRow("昵称", nicknameEdit);
+
+    auto* idLabel = new QLabel(QString::fromStdString(config.userId), &dialog);
+    idLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    form->addRow("用户ID", idLabel);
+
+    auto* ipLabel = new QLabel(localIpSummary(), &dialog);
+    ipLabel->setWordWrap(true);
+    ipLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    form->addRow("本机IP", ipLabel);
+
+    auto* dataLabel = new QLabel(dataDirPath(), &dialog);
+    dataLabel->setWordWrap(true);
+    dataLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    form->addRow("数据目录", dataLabel);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+
+    connect(pickAvatarBtn, &QPushButton::clicked, &dialog, [&]() {
+        const QString path = QFileDialog::getOpenFileName(&dialog,
+                                                          "选择头像",
+                                                          QFileInfo(selectedAvatar).absolutePath(),
+                                                          "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp)");
+        if (path.isEmpty()) {
+            return;
+        }
+        QImage image(path);
+        if (image.isNull()) {
+            QMessageBox::warning(&dialog, "提示", "头像文件无效，请重新选择。");
+            return;
+        }
+        selectedAvatar = path;
+        avatarLabel->setPixmap(makeRoundAvatar(image, 72, QString::fromStdString(config.userId)));
+    });
+
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    root->addLayout(avatarRow);
+    root->addLayout(form);
+    root->addStretch(1);
+    root->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) {
         return;
     }
+
+    const QString newName = nicknameEdit->text().trimmed();
+    if (newName.isEmpty()) {
+        QMessageBox::warning(this, "提示", "昵称不能为空。");
+        return;
+    }
+
+    std::string error;
+    if (!app_.updateLocalUserName(newName.toStdString(), &error)) {
+        QMessageBox::warning(this, "提示", QString::fromStdString(error.empty() ? "昵称保存失败。" : error));
+        return;
+    }
+
+    selfAvatarPath_ = selectedAvatar;
+    saveProfile();
+    applySelfAvatar();
 }
 
 void ChatWindow::refreshOnlinePeers() {
@@ -386,6 +573,7 @@ void ChatWindow::refreshOnlinePeers() {
             changed = true;
         }
         Contact& contact = *contactPtr;
+
         const QString newName = QString::fromStdString(peer.name).trimmed();
         const QString newIp = QString::fromStdString(peer.ip).trimmed();
 
@@ -474,7 +662,6 @@ void ChatWindow::renderCurrentConversation() {
         const QString sender = message.incoming ? (contact->name.isEmpty() ? QString("对方") : contact->name) : QString("我");
         const QString align = message.incoming ? "left" : "right";
         const QString bubbleBg = message.incoming ? "#f3f4f6" : "#dbeafe";
-        const QString bubbleColor = "#0f172a";
 
         QString content;
         if (message.isFile) {
@@ -493,9 +680,9 @@ void ChatWindow::renderCurrentConversation() {
                     "<div style='margin:8px 0;text-align:%1;'>"
                     "<div style='font-size:11px;color:#6b7280;margin-bottom:4px;'>%2  %3</div>"
                     "<div style='display:inline-block;max-width:72%%;padding:8px 10px;border-radius:10px;"
-                    "background:%4;color:%5;line-height:1.45;'>%6</div>"
+                    "background:%4;color:#0f172a;line-height:1.45;'>%5</div>"
                     "</div>")
-                    .arg(align, htmlEscape(sender), timeText(message.timestampMs), bubbleBg, bubbleColor, content);
+                    .arg(align, htmlEscape(sender), timeText(message.timestampMs), bubbleBg, content);
     }
     html += "</body></html>";
 
@@ -503,15 +690,6 @@ void ChatWindow::renderCurrentConversation() {
     if (QScrollBar* bar = conversationView_->verticalScrollBar()) {
         bar->setValue(bar->maximum());
     }
-}
-
-void ChatWindow::updateStatusBar() {
-    const Config config = app_.configCopy();
-    const QString text = QString("昵称: %1 | 用户ID: %2 | 数据目录: %3")
-                             .arg(QString::fromStdString(config.userName),
-                                  QString::fromStdString(config.userId),
-                                  QString::fromStdString(app_.dataDirString()));
-    statusBar()->showMessage(text);
 }
 
 void ChatWindow::handleMessageEvent(const MessageEvent& event) {
@@ -608,7 +786,8 @@ void ChatWindow::loadHistory(Contact& contact) {
         return;
     }
 
-    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    const QByteArray decrypted = decryptBlob(file.readAll());
+    const QJsonDocument doc = QJsonDocument::fromJson(decrypted);
     if (!doc.isArray()) {
         return;
     }
@@ -650,7 +829,9 @@ void ChatWindow::saveHistory(const Contact& contact) const {
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         return;
     }
-    file.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+
+    const QByteArray plain = QJsonDocument(arr).toJson(QJsonDocument::Compact);
+    file.write(encryptBlob(plain));
 }
 
 void ChatWindow::loadContacts() {
@@ -664,7 +845,8 @@ void ChatWindow::loadContacts() {
         return;
     }
 
-    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    const QByteArray decrypted = decryptBlob(file.readAll());
+    const QJsonDocument doc = QJsonDocument::fromJson(decrypted);
     if (!doc.isArray()) {
         return;
     }
@@ -714,7 +896,9 @@ void ChatWindow::saveContacts() const {
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         return;
     }
-    file.write(QJsonDocument(arr).toJson(QJsonDocument::Indented));
+
+    const QByteArray plain = QJsonDocument(arr).toJson(QJsonDocument::Compact);
+    file.write(encryptBlob(plain));
 }
 
 QString ChatWindow::dataDirPath() const {
@@ -726,10 +910,110 @@ QString ChatWindow::chatsDirPath() const {
 }
 
 QString ChatWindow::contactFilePath() const {
-    return QDir(dataDirPath()).filePath("contacts.json");
+    return QDir(dataDirPath()).filePath("contacts.dat");
 }
 
 QString ChatWindow::historyFilePath(const QString& userId) const {
     const QString token = safeFileToken(userId);
-    return QDir(chatsDirPath()).filePath(token + ".json");
+    return QDir(chatsDirPath()).filePath(token + ".dat");
+}
+
+QString ChatWindow::profileFilePath() const {
+    return QDir(dataDirPath()).filePath("profile.json");
+}
+
+void ChatWindow::loadProfile() {
+    QFile file(profileFilePath());
+    if (!file.exists()) {
+        return;
+    }
+    if (!file.open(QIODevice::ReadOnly)) {
+        return;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    if (!doc.isObject()) {
+        return;
+    }
+    const QJsonObject obj = doc.object();
+    selfAvatarPath_ = obj.value("avatar_path").toString();
+}
+
+void ChatWindow::saveProfile() const {
+    QDir().mkpath(dataDirPath());
+
+    QJsonObject obj;
+    obj.insert("avatar_path", selfAvatarPath_);
+
+    QFile file(profileFilePath());
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return;
+    }
+    file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+}
+
+void ChatWindow::applySelfAvatar() {
+    const Config config = app_.configCopy();
+    const QString seed = QString::fromStdString(config.userName + config.userId);
+
+    QImage image;
+    if (!selfAvatarPath_.isEmpty()) {
+        image.load(selfAvatarPath_);
+    }
+
+    const QPixmap avatar = makeRoundAvatar(image, 56, seed);
+    selfAvatarBtn_->setIcon(QIcon(avatar));
+    selfAvatarBtn_->setIconSize(QSize(56, 56));
+}
+
+QString ChatWindow::localIpSummary() const {
+    QStringList ips;
+    for (const QHostAddress& addr : QNetworkInterface::allAddresses()) {
+        if (addr.protocol() != QAbstractSocket::IPv4Protocol) {
+            continue;
+        }
+        if (addr.isLoopback()) {
+            continue;
+        }
+        ips.push_back(addr.toString());
+    }
+    ips.removeDuplicates();
+    if (ips.isEmpty()) {
+        return "未检测到";
+    }
+    return ips.join(" / ");
+}
+
+uint64_t ChatWindow::storageSeed() const {
+    return app_.localStorageKey() ^ 0x6A09E667F3BCC909ULL;
+}
+
+QByteArray ChatWindow::encryptBlob(const QByteArray& plain) const {
+    const uint64_t nonce = QRandomGenerator::global()->generate64();
+
+    QByteArray cipher = plain;
+    CipherState cipherState = initCipherState(storageSeed() ^ nonce);
+    if (!cipher.isEmpty()) {
+        xorCipherInPlace(cipher.data(), static_cast<size_t>(cipher.size()), cipherState);
+    }
+
+    QByteArray out;
+    out.reserve(4 + 8 + cipher.size());
+    out.append(kBlobMagic, 4);
+    out.append(nonceToBytes(nonce));
+    out.append(cipher);
+    return out;
+}
+
+QByteArray ChatWindow::decryptBlob(const QByteArray& blob) const {
+    if (blob.size() >= 12 && std::memcmp(blob.constData(), kBlobMagic, 4) == 0) {
+        const uint64_t nonce = bytesToNonce(blob, 4);
+        QByteArray plain = blob.mid(12);
+        CipherState cipherState = initCipherState(storageSeed() ^ nonce);
+        if (!plain.isEmpty()) {
+            xorCipherInPlace(plain.data(), static_cast<size_t>(plain.size()), cipherState);
+        }
+        return plain;
+    }
+    return QByteArray();
 }

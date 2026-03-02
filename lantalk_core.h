@@ -39,6 +39,8 @@ constexpr int kHeartbeatSeconds = 3;
 constexpr int kPeerTimeoutSeconds = 12;
 constexpr uint64_t kMaxTextBytes = 16 * 1024;
 constexpr uint64_t kMaxFileBytes = 1024ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kDhPrime = 2305843009213693951ULL;
+constexpr uint64_t kDhGenerator = 5ULL;
 
 enum class PacketType : uint8_t {
     Text = 1,
@@ -49,6 +51,8 @@ struct Config {
     std::string userName;
     std::string userId;
     uint16_t listenPort = 39001;
+    uint64_t e2eePrivate = 0;
+    uint64_t e2eePublic = 0;
 };
 
 struct Peer {
@@ -56,6 +60,7 @@ struct Peer {
     std::string name;
     std::string ip;
     uint16_t port = 0;
+    uint64_t e2eePublic = 0;
     std::chrono::steady_clock::time_point lastSeen;
 };
 
@@ -334,13 +339,103 @@ inline fs::path getExecutablePath() {
 
 }
 
+inline uint64_t modMulU64(uint64_t a, uint64_t b, uint64_t mod) {
+    uint64_t result = 0;
+    a %= mod;
+    b %= mod;
+    while (b > 0) {
+        if ((b & 1ULL) != 0) {
+            result = (result >= (mod - a)) ? (result + a - mod) : (result + a);
+        }
+        b >>= 1U;
+        if (b == 0) {
+            break;
+        }
+        a = (a >= (mod - a)) ? (a + a - mod) : (a + a);
+    }
+    return result;
+}
+
+inline uint64_t modPowU64(uint64_t base, uint64_t exp, uint64_t mod) {
+    uint64_t result = 1 % mod;
+    uint64_t cur = base % mod;
+    while (exp > 0) {
+        if ((exp & 1ULL) != 0) {
+            result = modMulU64(result, cur, mod);
+        }
+        cur = modMulU64(cur, cur, mod);
+        exp >>= 1;
+    }
+    return result;
+}
+
+inline bool parseU64Dec(const std::string& text, uint64_t& outValue) {
+    try {
+        size_t consumed = 0;
+        const unsigned long long value = std::stoull(text, &consumed, 10);
+        if (consumed != text.size()) {
+            return false;
+        }
+        outValue = static_cast<uint64_t>(value);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+struct CipherState {
+    uint64_t state = 0;
+    uint64_t block = 0;
+    int used = 8;
+};
+
+inline uint64_t splitMix64Next(uint64_t& state) {
+    uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27U)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31U);
+}
+
+inline CipherState initCipherState(uint64_t seed) {
+    CipherState st{};
+    st.state = seed ^ 0xD1B54A32D192ED03ULL;
+    st.block = 0;
+    st.used = 8;
+    return st;
+}
+
+inline void xorCipherInPlace(char* data, size_t len, CipherState& st) {
+    for (size_t i = 0; i < len; ++i) {
+        if (st.used >= 8) {
+            st.block = splitMix64Next(st.state);
+            st.used = 0;
+        }
+        const uint8_t keyByte = static_cast<uint8_t>((st.block >> (st.used * 8)) & 0xFFU);
+        data[i] = static_cast<char>(static_cast<uint8_t>(data[i]) ^ keyByte);
+        ++st.used;
+    }
+}
+
+inline uint64_t buildCipherSeed(uint64_t sharedSecret,
+                                const std::string& fromUserId,
+                                const std::string& toUserId,
+                                PacketType type,
+                                uint64_t ts) {
+    uint64_t seed = sharedSecret;
+    seed ^= fnv1a64(fromUserId);
+    seed ^= (fnv1a64(toUserId) << 1);
+    seed ^= (static_cast<uint64_t>(type) << 56);
+    seed ^= (ts * 0x9E3779B97F4A7C15ULL);
+    return seed;
+}
+
 class LanTalkApp {
 public:
     LanTalkApp()
         : exePath_(getExecutablePath()),
           baseDir_(fs::current_path()),
           exeTag_(buildExeTag()),
-          dataDir_(baseDir_ / ("data_" + exeTag_)),
+          dataDir_(baseDir_ / "data"),
           recvDir_(dataDir_ / "received"),
           configPath_(dataDir_ / "config.ini"),
           logPath_(dataDir_ / "chat.log"),
@@ -406,6 +501,12 @@ public:
             }
             return false;
         }
+        if (peer.e2eePublic <= 1 || peer.e2eePublic >= (kDhPrime - 1)) {
+            if (errorOut != nullptr) {
+                *errorOut = "对方未启用加密，无法发送。";
+            }
+            return false;
+        }
         if (!sendTextToPeer(peer, text)) {
             if (errorOut != nullptr) {
                 *errorOut = "消息发送失败。";
@@ -430,6 +531,12 @@ public:
         if (!getPeerByUserId(userId, peer)) {
             if (errorOut != nullptr) {
                 *errorOut = "对方当前不在线。";
+            }
+            return false;
+        }
+        if (peer.e2eePublic <= 1 || peer.e2eePublic >= (kDhPrime - 1)) {
+            if (errorOut != nullptr) {
+                *errorOut = "对方未启用加密，无法发送。";
             }
             return false;
         }
@@ -481,6 +588,10 @@ public:
         return dataDir_.string();
     }
 
+    uint64_t localStorageKey() const {
+        return fnv1a64(config_.userId + "|" + std::to_string(config_.e2eePrivate) + "|" + exeTag_);
+    }
+
     std::string lastError() const {
         std::lock_guard<std::mutex> lock(errorMutex_);
         return lastError_;
@@ -509,6 +620,8 @@ private:
         bool hasUser = false;
         bool hasUserId = false;
         bool hasPort = false;
+        bool hasE2eePrivate = false;
+        bool hasE2eePublic = false;
 
         if (fs::exists(configPath_)) {
             std::ifstream in(configPath_);
@@ -542,6 +655,18 @@ private:
                         }
                     } catch (...) {
                     }
+                } else if (key == "e2ee_private") {
+                    uint64_t parsed = 0;
+                    if (parseU64Dec(value, parsed) && parsed > 1 && parsed < (kDhPrime - 1)) {
+                        loaded.e2eePrivate = parsed;
+                        hasE2eePrivate = true;
+                    }
+                } else if (key == "e2ee_public") {
+                    uint64_t parsed = 0;
+                    if (parseU64Dec(value, parsed) && parsed > 1 && parsed < (kDhPrime - 1)) {
+                        loaded.e2eePublic = parsed;
+                        hasE2eePublic = true;
+                    }
                 }
             }
         }
@@ -561,6 +686,14 @@ private:
 
         if (!hasPort) {
             loaded.listenPort = static_cast<uint16_t>(39001 + (rng_() % 2000));
+        }
+
+        if (!hasE2eePrivate) {
+            loaded.e2eePrivate = 2ULL + (rng_() % (kDhPrime - 3ULL));
+            hasE2eePrivate = true;
+        }
+        if (!hasE2eePublic || modPowU64(kDhGenerator, loaded.e2eePrivate, kDhPrime) != loaded.e2eePublic) {
+            loaded.e2eePublic = modPowU64(kDhGenerator, loaded.e2eePrivate, kDhPrime);
         }
 
         loaded.userName = sanitizeHelloField(loaded.userName);
@@ -585,6 +718,8 @@ private:
         out << "username=" << config_.userName << '\n';
         out << "user_id=" << config_.userId << '\n';
         out << "listen_port=" << config_.listenPort << '\n';
+        out << "e2ee_private=" << config_.e2eePrivate << '\n';
+        out << "e2ee_public=" << config_.e2eePublic << '\n';
         return true;
     }
 
@@ -934,7 +1069,7 @@ private:
 
             const std::string msg(buffer, buffer + n);
             const auto parts = split(trim(msg), '\t');
-            if (parts.size() != 4 || parts[0] != "HELLO") {
+            if (parts.size() != 5 || parts[0] != "HELLO") {
                 continue;
             }
 
@@ -952,6 +1087,10 @@ private:
             try {
                 peerPort = std::stoi(parts[3]);
             } catch (...) {
+                continue;
+            }
+            uint64_t peerE2eePublic = 0;
+            if (!parseU64Dec(parts[4], peerE2eePublic) || peerE2eePublic <= 1 || peerE2eePublic >= (kDhPrime - 1)) {
                 continue;
             }
             if (peerPort <= 0 || peerPort > 65535) {
@@ -975,6 +1114,7 @@ private:
                     peer.name = peerName;
                     peer.ip = ipBuf;
                     peer.port = static_cast<uint16_t>(peerPort);
+                    peer.e2eePublic = peerE2eePublic;
                     peer.lastSeen = std::chrono::steady_clock::now();
                     peers_[peerUserId] = peer;
                     isNew = true;
@@ -983,6 +1123,7 @@ private:
                     it->second.name = peerName;
                     it->second.ip = ipBuf;
                     it->second.port = static_cast<uint16_t>(peerPort);
+                    it->second.e2eePublic = peerE2eePublic;
                     it->second.lastSeen = std::chrono::steady_clock::now();
                 }
             }
@@ -1010,7 +1151,7 @@ private:
             return;
         }
         const std::string payload = "HELLO\t" + config_.userId + "\t" + sanitizeHelloField(config_.userName) + "\t" +
-                                    std::to_string(config_.listenPort);
+                                    std::to_string(config_.listenPort) + "\t" + std::to_string(config_.e2eePublic);
 
         sockaddr_in target{};
         target.sin_family = AF_INET;
@@ -1085,12 +1226,15 @@ private:
         uint32_t magic = 0;
         uint8_t typeRaw = 0;
         uint16_t fromLen = 0;
+        uint16_t fromUserIdLen = 0;
         uint16_t nameLen = 0;
         uint64_t ts = 0;
+        uint64_t senderPublicKey = 0;
         uint64_t payloadLen = 0;
 
-        if (!recvU32(client, magic) || !recvU8(client, typeRaw) || !recvU16(client, fromLen) || !recvU16(client, nameLen) ||
-            !recvU64(client, ts) || !recvU64(client, payloadLen)) {
+        if (!recvU32(client, magic) || !recvU8(client, typeRaw) || !recvU16(client, fromLen) ||
+            !recvU16(client, fromUserIdLen) || !recvU16(client, nameLen) ||
+            !recvU64(client, ts) || !recvU64(client, senderPublicKey) || !recvU64(client, payloadLen)) {
             return;
         }
 
@@ -1098,7 +1242,10 @@ private:
             return;
         }
 
-        if (fromLen == 0 || fromLen > 128 || nameLen > 260) {
+        if (fromLen == 0 || fromLen > 128 || fromUserIdLen == 0 || fromUserIdLen > 128 || nameLen > 260) {
+            return;
+        }
+        if (senderPublicKey <= 1 || senderPublicKey >= (kDhPrime - 1)) {
             return;
         }
 
@@ -1120,6 +1267,11 @@ private:
             return;
         }
 
+        std::string fromUserId(fromUserIdLen, '\0');
+        if (!recvAll(client, fromUserId.data(), fromUserId.size())) {
+            return;
+        }
+
         std::string fileName;
         if (nameLen > 0) {
             fileName.resize(nameLen);
@@ -1135,13 +1287,19 @@ private:
             std::memcpy(ipBuf, kUnknownIp, sizeof(kUnknownIp));
         }
         const std::string remoteIp(ipBuf);
+        const uint64_t sharedSecret = modPowU64(senderPublicKey, config_.e2eePrivate, kDhPrime);
+        if (sharedSecret <= 1) {
+            return;
+        }
+        CipherState cipher = initCipherState(buildCipherSeed(sharedSecret, fromUserId, config_.userId, type, ts));
 
         if (type == PacketType::Text) {
             std::string text(static_cast<size_t>(payloadLen), '\0');
             if (!recvAll(client, text.data(), text.size())) {
                 return;
             }
-            onIncomingText(fromName, remoteIp, text, static_cast<std::time_t>(ts));
+            xorCipherInPlace(text.data(), text.size(), cipher);
+            onIncomingText(fromUserId, fromName, remoteIp, text, static_cast<std::time_t>(ts));
             return;
         }
 
@@ -1161,6 +1319,7 @@ private:
                 fs::remove(savePath, ec);
                 return;
             }
+            xorCipherInPlace(chunk.data(), chunkSize, cipher);
             out.write(chunk.data(), static_cast<std::streamsize>(chunkSize));
             if (!out) {
                 out.close();
@@ -1172,11 +1331,14 @@ private:
         }
 
         out.close();
-        onIncomingFile(fromName, remoteIp, fileName, savePath, payloadLen, static_cast<std::time_t>(ts));
+        onIncomingFile(fromUserId, fromName, remoteIp, fileName, savePath, payloadLen, static_cast<std::time_t>(ts));
     }
 
     bool sendTextToPeer(const Peer& peer, const std::string& text) {
         if (text.empty() || text.size() > kMaxTextBytes) {
+            return false;
+        }
+        if (peer.e2eePublic <= 1 || peer.e2eePublic >= (kDhPrime - 1)) {
             return false;
         }
 
@@ -1190,16 +1352,33 @@ private:
         } guard{sock};
 
         const uint64_t ts = static_cast<uint64_t>(std::time(nullptr));
-        if (!sendHeader(sock, PacketType::Text, config_.userName, "", static_cast<uint64_t>(text.size()), ts)) {
+        if (!sendHeader(sock,
+                        PacketType::Text,
+                        config_.userName,
+                        config_.userId,
+                        "",
+                        static_cast<uint64_t>(text.size()),
+                        ts,
+                        config_.e2eePublic)) {
             return false;
         }
-        return sendAll(sock, text.data(), text.size());
+        const uint64_t sharedSecret = modPowU64(peer.e2eePublic, config_.e2eePrivate, kDhPrime);
+        if (sharedSecret <= 1) {
+            return false;
+        }
+        std::string encrypted = text;
+        CipherState cipher = initCipherState(buildCipherSeed(sharedSecret, config_.userId, peer.userId, PacketType::Text, ts));
+        xorCipherInPlace(encrypted.data(), encrypted.size(), cipher);
+        return sendAll(sock, encrypted.data(), encrypted.size());
     }
 
     bool sendFileToPeer(const Peer& peer, const fs::path& filePath) {
         std::error_code ec;
         const uint64_t fileSize = fs::file_size(filePath, ec);
         if (ec || fileSize == 0 || fileSize > kMaxFileBytes) {
+            return false;
+        }
+        if (peer.e2eePublic <= 1 || peer.e2eePublic >= (kDhPrime - 1)) {
             return false;
         }
 
@@ -1221,9 +1400,21 @@ private:
         } guard{sock};
 
         const uint64_t ts = static_cast<uint64_t>(std::time(nullptr));
-        if (!sendHeader(sock, PacketType::File, config_.userName, fileName, fileSize, ts)) {
+        if (!sendHeader(sock,
+                        PacketType::File,
+                        config_.userName,
+                        config_.userId,
+                        fileName,
+                        fileSize,
+                        ts,
+                        config_.e2eePublic)) {
             return false;
         }
+        const uint64_t sharedSecret = modPowU64(peer.e2eePublic, config_.e2eePrivate, kDhPrime);
+        if (sharedSecret <= 1) {
+            return false;
+        }
+        CipherState cipher = initCipherState(buildCipherSeed(sharedSecret, config_.userId, peer.userId, PacketType::File, ts));
 
         std::vector<char> chunk(64 * 1024);
         uint64_t remaining = fileSize;
@@ -1234,6 +1425,7 @@ private:
             if (got <= 0) {
                 return false;
             }
+            xorCipherInPlace(chunk.data(), static_cast<size_t>(got), cipher);
             if (!sendAll(sock, chunk.data(), static_cast<size_t>(got))) {
                 return false;
             }
@@ -1302,20 +1494,29 @@ private:
     bool sendHeader(socket_t sock,
                     PacketType type,
                     const std::string& from,
+                    const std::string& fromUserId,
                     const std::string& fileName,
                     uint64_t payloadLen,
-                    uint64_t ts) {
-        if (from.empty() || from.size() > 128 || fileName.size() > 260) {
+                    uint64_t ts,
+                    uint64_t senderPublicKey) {
+        if (from.empty() || from.size() > 128 || fromUserId.empty() || fromUserId.size() > 128 || fileName.size() > 260) {
+            return false;
+        }
+        if (senderPublicKey <= 1 || senderPublicKey >= (kDhPrime - 1)) {
             return false;
         }
 
         if (!sendU32(sock, kPacketMagic) || !sendU8(sock, static_cast<uint8_t>(type)) ||
-            !sendU16(sock, static_cast<uint16_t>(from.size())) || !sendU16(sock, static_cast<uint16_t>(fileName.size())) ||
-            !sendU64(sock, ts) || !sendU64(sock, payloadLen)) {
+            !sendU16(sock, static_cast<uint16_t>(from.size())) || !sendU16(sock, static_cast<uint16_t>(fromUserId.size())) ||
+            !sendU16(sock, static_cast<uint16_t>(fileName.size())) || !sendU64(sock, ts) ||
+            !sendU64(sock, senderPublicKey) || !sendU64(sock, payloadLen)) {
             return false;
         }
 
         if (!sendAll(sock, from.data(), from.size())) {
+            return false;
+        }
+        if (!sendAll(sock, fromUserId.data(), fromUserId.size())) {
             return false;
         }
 
@@ -1326,7 +1527,8 @@ private:
         return true;
     }
 
-    void onIncomingText(const std::string& fromName,
+    void onIncomingText(const std::string& fromUserId,
+                        const std::string& fromName,
                         const std::string& remoteIp,
                         const std::string& text,
                         std::time_t sentTime) {
@@ -1334,7 +1536,7 @@ private:
         printLine("[" + stamp + "] [MSG] " + fromName + "(" + remoteIp + "): " + text);
         appendLog("IN MSG from=" + fromName + "(" + remoteIp + ") text=" + text);
         MessageEvent event;
-        event.peerUserId = inferUserIdForIncoming(fromName, remoteIp);
+        event.peerUserId = fromUserId;
         event.peerName = fromName;
         event.peerIp = remoteIp;
         event.text = text;
@@ -1344,7 +1546,8 @@ private:
         emitMessageEvent(event);
     }
 
-    void onIncomingFile(const std::string& fromName,
+    void onIncomingFile(const std::string& fromUserId,
+                        const std::string& fromName,
                         const std::string& remoteIp,
                         const std::string& fileName,
                         const fs::path& savePath,
@@ -1356,7 +1559,7 @@ private:
         appendLog("IN FILE from=" + fromName + "(" + remoteIp + ") name=" + fileName + " save=" + savePath.string() +
                   " bytes=" + std::to_string(size));
         MessageEvent event;
-        event.peerUserId = inferUserIdForIncoming(fromName, remoteIp);
+        event.peerUserId = fromUserId;
         event.peerName = fromName;
         event.peerIp = remoteIp;
         event.fileName = fileName;
@@ -1432,21 +1635,6 @@ private:
         }
         outPeer = it->second;
         return true;
-    }
-
-    std::string inferUserIdForIncoming(const std::string& fromName, const std::string& remoteIp) {
-        std::lock_guard<std::mutex> lock(peersMutex_);
-        for (const auto& kv : peers_) {
-            if (kv.second.ip == remoteIp && kv.second.name == fromName) {
-                return kv.second.userId;
-            }
-        }
-        for (const auto& kv : peers_) {
-            if (kv.second.ip == remoteIp) {
-                return kv.second.userId;
-            }
-        }
-        return "peer_" + shortHashHex(fromName + "@" + remoteIp);
     }
 
     void setLastError(const std::string& errorText) {

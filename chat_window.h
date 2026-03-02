@@ -1,8 +1,10 @@
 #pragma once
 
-#include "../lantalk_core.h"
+#include "lantalk_core.h"
 
 #include <QMainWindow>
+#include <QByteArray>
+#include <QString>
 
 #include <cstdint>
 #include <vector>
@@ -10,8 +12,8 @@
 class QListWidget;
 class QListWidgetItem;
 class QCloseEvent;
-class QLineEdit;
 class QPushButton;
+class QToolButton;
 class QTextBrowser;
 class QTextEdit;
 class QTimer;
@@ -47,14 +49,13 @@ private:
     void setupUi();
     void bindEvents();
 
-    void onRename();
     void onSendMessage();
     void onSendFile();
+    void openSettingsDialog();
 
     void refreshOnlinePeers();
     void rebuildContactList();
     void renderCurrentConversation();
-    void updateStatusBar();
 
     void handleMessageEvent(const MessageEvent& event);
 
@@ -72,13 +73,23 @@ private:
     QString chatsDirPath() const;
     QString contactFilePath() const;
     QString historyFilePath(const QString& userId) const;
+    QString profileFilePath() const;
+
+    void loadProfile();
+    void saveProfile() const;
+    void applySelfAvatar();
+    QString localIpSummary() const;
+
+    uint64_t storageSeed() const;
+    QByteArray encryptBlob(const QByteArray& plain) const;
+    QByteArray decryptBlob(const QByteArray& blob) const;
 
     LanTalkApp app_;
     QTimer* refreshTimer_ = nullptr;
 
+    QPushButton* selfAvatarBtn_ = nullptr;
+    QToolButton* settingsBtn_ = nullptr;
     QListWidget* contactList_ = nullptr;
-    QLineEdit* nameEdit_ = nullptr;
-    QPushButton* renameBtn_ = nullptr;
     QTextBrowser* conversationView_ = nullptr;
     QTextEdit* inputEdit_ = nullptr;
     QPushButton* sendBtn_ = nullptr;
@@ -86,4 +97,5 @@ private:
 
     std::vector<Contact> contacts_;
     QString activeContactId_;
+    QString selfAvatarPath_;
 };

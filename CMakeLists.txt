@@ -17,14 +17,14 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
 add_executable(lantalk WIN32
   main.cpp
-  ui/chat_window.cpp
-  ui/chat_window.h
+  chat_window.cpp
+  chat_window.h
 )
-target_link_libraries(lantalk PRIVATE Qt6::Widgets ws2_32)
+target_link_libraries(lantalk PRIVATE Qt6::Widgets Qt6::Network ws2_32)
 target_compile_definitions(lantalk PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 
 if(MSVC)
