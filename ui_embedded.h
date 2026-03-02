@@ -14,115 +14,128 @@ inline std::string ui_html() {
 <title>LanTalk</title>
 <style>
 :root {
-  --bg: #f5f7fa;
+  --bg: #f3f5f8;
+  --left: #edf1f5;
   --panel: #ffffff;
-  --line: #dbe2ea;
-  --text: #1d2833;
-  --muted: #6e7b88;
-  --blue: #2387ff;
-  --in: #f1f4f8;
+  --line: #dbe3ec;
+  --text: #1f2933;
+  --muted: #718096;
+  --blue: #2d8cff;
+  --msg-in: #eff3f7;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; width: 100%; height: 100%; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
-#app { width: 100%; height: 100%; display: grid; grid-template-rows: 58px 1px 1fr; }
-#top { background: var(--panel); display: flex; align-items: center; justify-content: space-between; padding: 0 14px; }
-#top .meta { min-width: 0; }
-#self-name { font-size: 14px; font-weight: 600; }
-#self-id { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 680px; }
-#rename-btn { border: 1px solid var(--line); background: #fff; border-radius: 8px; height: 34px; padding: 0 12px; cursor: pointer; }
-#line { background: var(--line); }
-#main { min-height: 0; display: grid; grid-template-columns: 300px 1px 1fr; }
-#peers { background: #f8fafc; overflow-y: auto; }
-#vline { background: var(--line); }
-#chat { display: grid; grid-template-rows: 52px 1px 1fr 1px 96px; background: var(--panel); }
-#peer-head { display: flex; align-items: center; padding: 0 14px; font-weight: 600; }
-#peer-head span { margin-left: 8px; color: var(--muted); font-size: 12px; }
-#msgs { overflow-y: auto; padding: 14px; }
-#empty { display: grid; place-items: center; color: #98a4b1; }
-#compose { padding: 8px 12px; display: grid; grid-template-rows: 1fr 34px; gap: 8px; }
-#input { width: 100%; height: 100%; border: none; resize: none; outline: none; background: transparent; font-size: 14px; line-height: 1.5; }
-#send { justify-self: end; width: 92px; border: none; border-radius: 8px; background: var(--blue); color: #fff; cursor: pointer; }
-.peer-item { height: 62px; display: grid; grid-template-columns: 1fr auto; align-items: center; padding: 8px 12px; cursor: pointer; }
-.peer-item.active { background: #e8eff8; }
-.peer-item:hover { background: #eef4fa; }
-.peer-title { display: flex; align-items: center; gap: 6px; }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: #97a3af; }
-.dot.on { background: #35b768; }
-.peer-name { font-size: 13px; font-weight: 600; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.peer-last { font-size: 12px; color: var(--muted); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.badge { min-width: 18px; padding: 0 6px; height: 18px; border-radius: 10px; background: #ff4d4f; color: #fff; font-size: 11px; display: grid; place-items: center; }
-.msg { display: flex; margin-bottom: 10px; }
-.msg.out { justify-content: flex-end; }
-.bubble { width: fit-content; max-width: min(25em, 72%); background: var(--in); border-radius: 14px; padding: 8px 12px; white-space: pre-wrap; word-break: break-word; }
-.msg.out .bubble { background: var(--blue); color: #fff; }
-.time { margin-top: 4px; font-size: 11px; color: #90a0ae; }
-#rename-dialog { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(9, 18, 32, 0.2); }
-#rename-card { width: 340px; background: #fff; border-radius: 10px; border: 1px solid var(--line); padding: 12px; }
-#rename-input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-top: 8px; }
+html, body { margin: 0; width: 100%; height: 100%; background: var(--bg); color: var(--text); font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+#app { width: 100%; height: 100%; display: grid; grid-template-columns: 340px 1px 1fr; }
+#left { min-height: 0; background: var(--left); display: grid; grid-template-rows: 76px 1px 1fr; }
+#self { display: flex; align-items: center; justify-content: space-between; padding: 0 14px; }
+#self-main { min-width: 0; }
+#self-name { font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#self-id { margin-top: 4px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#rename { height: 32px; border-radius: 8px; border: 1px solid var(--line); background: #fff; padding: 0 10px; cursor: pointer; }
+.vline, .hline { background: var(--line); }
+#peers { overflow-y: auto; }
+.peer { height: 66px; display: grid; grid-template-columns: 1fr auto; align-items: center; padding: 10px 12px; cursor: pointer; }
+.peer:hover { background: #e8eef5; }
+.peer.active { background: #dde8f5; }
+.peer-top { display: flex; align-items: center; gap: 6px; }
+.peer-name { font-size: 13px; font-weight: 600; max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: #9aa6b2; }
+.dot.on { background: #37b669; }
+.peer-last { margin-top: 4px; color: var(--muted); font-size: 12px; max-width: 248px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { min-width: 18px; height: 18px; border-radius: 10px; background: #ff4d4f; color: #fff; font-size: 11px; display: grid; place-items: center; padding: 0 5px; }
+#chat { min-height: 0; background: var(--panel); display: grid; grid-template-rows: 58px 1px 1fr 1px 120px; }
+#chat-head { display: flex; align-items: center; padding: 0 14px; font-weight: 700; }
+#chat-state { margin-left: 8px; font-size: 12px; color: var(--muted); font-weight: 500; }
+#empty { display: grid; place-items: center; color: #98a2ad; }
+#messages { display: none; overflow-y: auto; padding: 14px; }
+.msg-row { display: flex; margin-bottom: 10px; }
+.msg-row.out { justify-content: flex-end; }
+.bubble-wrap { max-width: min(25em, 72%); }
+.bubble { border-radius: 14px; padding: 8px 12px; background: var(--msg-in); white-space: pre-wrap; word-break: break-word; line-height: 1.45; font-size: 14px; width: fit-content; }
+.msg-row.out .bubble { background: var(--blue); color: #fff; margin-left: auto; }
+.time { margin-top: 4px; color: #93a0ad; font-size: 11px; }
+.msg-row.out .time { text-align: right; }
+#composer { display: grid; grid-template-rows: 1fr 34px; gap: 8px; padding: 10px 12px; }
+#input { width: 100%; height: 100%; border: none; outline: none; resize: none; background: transparent; font-size: 14px; line-height: 1.5; }
+#send { justify-self: end; width: 92px; border-radius: 8px; border: none; background: var(--blue); color: #fff; cursor: pointer; }
+#rename-mask { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.2); }
+#rename-card { width: 340px; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+#rename-input { margin-top: 8px; width: 100%; border-radius: 8px; border: 1px solid var(--line); padding: 8px; }
 #rename-actions { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
-#rename-actions button { height: 32px; border-radius: 8px; padding: 0 10px; border: 1px solid var(--line); background: #fff; cursor: pointer; }
-#rename-actions .ok { background: var(--blue); color: #fff; border-color: var(--blue); }
+#rename-actions button { height: 32px; border-radius: 8px; border: 1px solid var(--line); background: #fff; padding: 0 10px; cursor: pointer; }
+#rename-ok { background: var(--blue) !important; color: #fff; border-color: var(--blue) !important; }
 </style>
 </head>
 <body>
 <div id="app">
-  <header id="top">
-    <div class="meta">
-      <div id="self-name"></div>
-      <div id="self-id"></div>
-    </div>
-    <button id="rename-btn">修改昵称</button>
-  </header>
-  <div id="line"></div>
-  <section id="main">
-    <aside id="peers"></aside>
-    <div id="vline"></div>
-    <div id="chat">
-      <div id="peer-head">未选择会话<span></span></div>
-      <div id="line"></div>
-      <div id="empty">等待局域网用户上线</div>
-      <div id="msgs" style="display:none"></div>
-      <div id="line"></div>
-      <div id="compose">
-        <textarea id="input" placeholder="回车发送，Shift+回车换行"></textarea>
-        <button id="send">发送</button>
+  <section id="left">
+    <div id="self">
+      <div id="self-main">
+        <div id="self-name"></div>
+        <div id="self-id"></div>
       </div>
+      <button id="rename">昵称</button>
+    </div>
+    <div class="hline"></div>
+    <div id="peers"></div>
+  </section>
+  <div class="vline"></div>
+  <section id="chat">
+    <div id="chat-head">未选择会话<span id="chat-state"></span></div>
+    <div class="hline"></div>
+    <div id="empty">等待局域网好友上线</div>
+    <div id="messages"></div>
+    <div class="hline"></div>
+    <div id="composer">
+      <textarea id="input" placeholder="回车发送，Shift + 回车换行"></textarea>
+      <button id="send">发送</button>
     </div>
   </section>
 </div>
 
-<div id="rename-dialog">
+<div id="rename-mask">
   <div id="rename-card">
-    <div style="font-size:14px;font-weight:600;">修改昵称</div>
+    <div style="font-weight:700;font-size:14px;">修改昵称</div>
     <input id="rename-input" maxlength="32" />
     <div id="rename-actions">
       <button id="rename-cancel">取消</button>
-      <button class="ok" id="rename-save">保存</button>
+      <button id="rename-ok">保存</button>
     </div>
   </div>
 </div>
 
 <script>
-const state = { revision: 0, self: null, peers: [], active: "", messages: [] };
+const state = { self: null, peers: [], active: "", messages: [] };
 
 function b64e(s){ return btoa(unescape(encodeURIComponent(s || ""))); }
-function b64d(s){ try { return decodeURIComponent(escape(atob(s || ""))); } catch { return ""; } }
 
-function safe(parts){ return parts.join("\t"); }
+function esc(s){ return s == null ? "" : String(s); }
+
+function mk(parts){ return parts.join("\t"); }
 
 async function rpc(cmd){
   try {
     const raw = await window.native(cmd);
     return JSON.parse(raw);
   } catch {
-    return { ok: false, error: "rpc failed" };
+    return { ok: false };
   }
 }
 
+async function pull(forceOpen){
+  const res = await rpc(mk(["snapshot", forceOpen || state.active || ""]));
+  if(!res.ok){ return; }
+  state.self = res.self || state.self;
+  state.peers = res.peers || [];
+  state.active = res.active || "";
+  state.messages = res.messages || [];
+  render();
+}
+
 function renderTop(){
-  if(!state.self) return;
-  document.getElementById("self-name").textContent = state.self.name || "";
-  document.getElementById("self-id").textContent = state.self.id || "";
+  if(!state.self){ return; }
+  document.getElementById("self-name").textContent = esc(state.self.name);
+  document.getElementById("self-id").textContent = esc(state.self.id);
 }
 
 function renderPeers(){
@@ -130,29 +143,33 @@ function renderPeers(){
   box.innerHTML = "";
   state.peers.forEach(p => {
     const row = document.createElement("div");
-    row.className = "peer-item" + (state.active === p.id ? " active" : "");
+    row.className = "peer" + (state.active === p.id ? " active" : "");
     row.onclick = async () => {
       state.active = p.id;
-      await rpc(safe(["open", p.id]));
-      await pull(true);
+      await rpc(mk(["open", p.id]));
+      await pull(p.id);
     };
 
     const left = document.createElement("div");
-    const title = document.createElement("div");
-    title.className = "peer-title";
+
+    const top = document.createElement("div");
+    top.className = "peer-top";
+
     const name = document.createElement("div");
     name.className = "peer-name";
-    name.textContent = p.name || p.id;
+    name.textContent = esc(p.name || p.id);
+
     const dot = document.createElement("div");
     dot.className = "dot" + (p.online ? " on" : "");
-    title.appendChild(name);
-    title.appendChild(dot);
+
+    top.appendChild(name);
+    top.appendChild(dot);
 
     const last = document.createElement("div");
     last.className = "peer-last";
-    last.textContent = p.last || "";
+    last.textContent = esc(p.last || "");
 
-    left.appendChild(title);
+    left.appendChild(top);
     left.appendChild(last);
 
     const badge = document.createElement("div");
@@ -168,110 +185,95 @@ function renderPeers(){
 
 function renderMessages(){
   const empty = document.getElementById("empty");
-  const msgs = document.getElementById("msgs");
-  const head = document.getElementById("peer-head");
+  const msgs = document.getElementById("messages");
+  const head = document.getElementById("chat-head");
+  const headState = document.getElementById("chat-state");
 
   if(!state.active){
-    head.innerHTML = "未选择会话<span></span>";
+    head.childNodes[0].nodeValue = "未选择会话";
+    headState.textContent = "";
     empty.style.display = "grid";
     msgs.style.display = "none";
     return;
   }
 
   const p = state.peers.find(v => v.id === state.active);
-  head.innerHTML = `${(p?.name || state.active)}<span>${p?.online ? "在线" : "离线"}</span>`;
+  head.childNodes[0].nodeValue = esc((p && p.name) ? p.name : state.active);
+  headState.textContent = p ? (p.online ? " 在线" : " 离线") : "";
+
   empty.style.display = "none";
   msgs.style.display = "block";
   msgs.innerHTML = "";
 
   state.messages.forEach(m => {
     const row = document.createElement("div");
-    row.className = "msg" + (m.out ? " out" : "");
+    row.className = "msg-row" + (m.out ? " out" : "");
 
     const wrap = document.createElement("div");
+    wrap.className = "bubble-wrap";
+
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    bubble.textContent = m.text || "";
+    bubble.textContent = esc(m.text);
 
-    const tm = document.createElement("div");
-    tm.className = "time";
-    tm.textContent = m.time || "";
+    const time = document.createElement("div");
+    time.className = "time";
+    time.textContent = esc(m.time || "");
 
     wrap.appendChild(bubble);
-    wrap.appendChild(tm);
+    wrap.appendChild(time);
     row.appendChild(wrap);
     msgs.appendChild(row);
   });
+
   msgs.scrollTop = msgs.scrollHeight;
 }
 
-async function pull(force = false){
-  const res = await rpc(safe(["snapshot", state.active || "", String(state.revision || 0)]));
-  if(!res.ok) return;
-  if(!force && !res.changed) return;
-
-  state.revision = res.revision || state.revision;
-  state.self = res.self || state.self;
-  state.peers = res.peers || [];
-  state.active = res.active || "";
-  state.messages = res.messages || [];
-
+function render(){
   renderTop();
   renderPeers();
   renderMessages();
 }
 
 async function sendNow(){
-  if(!state.active) return;
+  if(!state.active){ return; }
   const input = document.getElementById("input");
   const text = input.value;
-  if(!text.trim()) return;
+  if(!text.trim()){ return; }
   input.value = "";
-  await rpc(safe(["send", state.active, b64e(text)]));
-  await pull(true);
+  await rpc(mk(["send", state.active, b64e(text)]));
+  await pull(state.active);
 }
 
-function bindEvents(){
-  const input = document.getElementById("input");
-  input.addEventListener("keydown", async e => {
+function bind(){
+  document.getElementById("send").onclick = sendNow;
+  document.getElementById("input").addEventListener("keydown", async e => {
     if(e.key === "Enter" && !e.shiftKey){
       e.preventDefault();
       await sendNow();
     }
   });
-  document.getElementById("send").onclick = sendNow;
 
-  const dlg = document.getElementById("rename-dialog");
-  document.getElementById("rename-btn").onclick = () => {
-    document.getElementById("rename-input").value = state.self?.name || "";
-    dlg.style.display = "flex";
+  const mask = document.getElementById("rename-mask");
+  document.getElementById("rename").onclick = () => {
+    document.getElementById("rename-input").value = state.self ? state.self.name : "";
+    mask.style.display = "flex";
   };
-  document.getElementById("rename-cancel").onclick = () => { dlg.style.display = "none"; };
-  document.getElementById("rename-save").onclick = async () => {
+  document.getElementById("rename-cancel").onclick = () => { mask.style.display = "none"; };
+  document.getElementById("rename-ok").onclick = async () => {
     const v = (document.getElementById("rename-input").value || "").trim();
-    if(v){
-      await rpc(safe(["set_name", b64e(v)]));
-      dlg.style.display = "none";
-      await pull(true);
-    }
+    if(!v){ return; }
+    await rpc(mk(["set_name", b64e(v)]));
+    mask.style.display = "none";
+    await pull(state.active);
   };
-  dlg.addEventListener("click", e => { if(e.target.id === "rename-dialog") dlg.style.display = "none"; });
+  mask.addEventListener("click", e => { if(e.target.id === "rename-mask") mask.style.display = "none"; });
 }
 
 async function init(){
-  bindEvents();
-  const boot = await rpc("bootstrap");
-  if(boot.ok){
-    state.revision = boot.revision || 0;
-    state.self = boot.self || null;
-    state.peers = boot.peers || [];
-    state.active = boot.active || "";
-    state.messages = boot.messages || [];
-    renderTop();
-    renderPeers();
-    renderMessages();
-  }
-  setInterval(() => pull(false), 900);
+  bind();
+  await pull("");
+  setInterval(() => { pull(state.active); }, 800);
 }
 
 init();

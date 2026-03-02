@@ -1,4 +1,4 @@
-#include "app.h"
+#include "engine.h"
 #include "ui_embedded.h"
 
 #include <cctype>
@@ -89,29 +89,29 @@ std::vector<std::string> parse_json_args(const std::string &req) {
 }
 
 int run_app() {
-  lantalk::App app;
+  lantalk::LanTalkEngine engine;
   std::string error;
-  if (!app.boot(error)) {
+  if (!engine.boot(error)) {
     std::cerr << "boot failed: " << error << std::endl;
     return 1;
   }
 
   webview::webview win(true, nullptr);
   win.set_title("LanTalk");
-  win.set_size(1220, 820, WEBVIEW_HINT_NONE);
+  win.set_size(1260, 840, WEBVIEW_HINT_NONE);
 
-  win.bind("native", [&app](const std::string &req) {
+  win.bind("native", [&engine](const std::string &req) {
     const auto args = parse_json_args(req);
     if (args.empty()) {
       return std::string(R"({"ok":false,"error":"missing args"})");
     }
-    return app.rpc(args[0]);
+    return engine.handle_rpc(args[0]);
   });
 
   win.set_html(lantalk::ui_html());
   win.run();
 
-  app.shutdown();
+  engine.shutdown();
   return 0;
 }
 
@@ -119,7 +119,6 @@ int run_app() {
 
 #if defined(_WIN32)
 #include <Windows.h>
-
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
   return run_app();
 }
