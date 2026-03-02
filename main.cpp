@@ -326,6 +326,22 @@ std::string randomHex(std::mt19937_64& rng, size_t bytes) {
     return out;
 }
 
+std::string readEnvVar(const char* name) {
+#ifdef _WIN32
+    char* raw = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&raw, &len, name) != 0 || raw == nullptr) {
+        return "";
+    }
+    std::string value(raw);
+    std::free(raw);
+    return value;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : "";
+#endif
+}
+
 uint64_t fnv1a64(const std::string& input) {
     uint64_t hash = 14695981039346656037ULL;
     for (unsigned char ch : input) {
@@ -558,11 +574,11 @@ private:
         }
 
         if (!hasUser) {
-            const char* envUser = std::getenv("USERNAME");
-            if (envUser == nullptr || std::string(envUser).empty()) {
-                envUser = std::getenv("USER");
+            std::string envUser = readEnvVar("USERNAME");
+            if (envUser.empty()) {
+                envUser = readEnvVar("USER");
             }
-            loaded.userName = (envUser != nullptr && std::string(envUser).empty() == false) ? envUser : "LanTalkUser";
+            loaded.userName = !envUser.empty() ? envUser : "LanTalkUser";
             hasUser = true;
         }
 
@@ -1175,7 +1191,8 @@ private:
 
         char ipBuf[INET_ADDRSTRLEN] = {0};
         if (inet_ntop(AF_INET, &remote.sin_addr, ipBuf, sizeof(ipBuf)) == nullptr) {
-            std::strncpy(ipBuf, "unknown", sizeof(ipBuf) - 1);
+            constexpr char kUnknownIp[] = "unknown";
+            std::memcpy(ipBuf, kUnknownIp, sizeof(kUnknownIp));
         }
         const std::string remoteIp(ipBuf);
 
@@ -1871,7 +1888,7 @@ private:
         return true;
     }
 
-    std::string peerNameByUserId(const std::string& userId) const {
+    std::string peerNameByUserId(const std::string& userId) {
         const auto peers = app_.snapshotPeers();
         for (const auto& peer : peers) {
             if (peer.userId == userId) {
