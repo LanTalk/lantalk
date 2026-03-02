@@ -92,6 +92,7 @@ private:
   void bump_revision();
 
 private:
+  struct DataSlotLock;
   struct SocketState;
 
   mutable std::mutex mu_;
@@ -100,6 +101,7 @@ private:
 
   std::filesystem::path work_dir_;
   std::filesystem::path data_dir_;
+  std::unique_ptr<DataSlotLock> data_lock_;
 
   std::string self_id_;
   std::string self_name_;

@@ -1,6 +1,6 @@
 out/
 dist/
-data/
+data*/
 *.obj
 *.pdb
 *.ilk

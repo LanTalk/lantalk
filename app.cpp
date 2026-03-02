@@ -20,7 +20,9 @@
 #pragma comment(lib, "ws2_32.lib")
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <sys/file.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -163,6 +165,66 @@ struct App::SocketState {
   std::thread accept_thread;
 };
 
+struct App::DataSlotLock {
+  std::filesystem::path dir;
+#if defined(_WIN32)
+  HANDLE handle = nullptr;
+#else
+  int fd = -1;
+#endif
+
+  ~DataSlotLock() {
+#if defined(_WIN32)
+    if (handle != nullptr) {
+      OVERLAPPED ov{};
+      UnlockFileEx(handle, 0, MAXDWORD, MAXDWORD, &ov);
+      CloseHandle(handle);
+      handle = nullptr;
+    }
+#else
+    if (fd >= 0) {
+      flock(fd, LOCK_UN);
+      close(fd);
+      fd = -1;
+    }
+#endif
+  }
+
+  bool try_lock(const std::filesystem::path &lock_file) {
+#if defined(_WIN32)
+    handle = CreateFileW(lock_file.c_str(),
+                         GENERIC_READ | GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         nullptr,
+                         OPEN_ALWAYS,
+                         FILE_ATTRIBUTE_NORMAL,
+                         nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+      handle = nullptr;
+      return false;
+    }
+    OVERLAPPED ov{};
+    if (!LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &ov)) {
+      CloseHandle(handle);
+      handle = nullptr;
+      return false;
+    }
+    return true;
+#else
+    fd = open(lock_file.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
+      return false;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+      close(fd);
+      fd = -1;
+      return false;
+    }
+    return true;
+#endif
+  }
+};
+
 App::App() = default;
 
 App::~App() {
@@ -201,14 +263,29 @@ void App::shutdown() {
 }
 
 bool App::init_data_dir(std::string &error) {
-  data_dir_ = work_dir_ / "data";
-  std::error_code ec;
-  std::filesystem::create_directories(data_dir_, ec);
-  if (ec) {
-    error = "cannot create data directory";
-    return false;
+  for (int i = 0; i < 64; ++i) {
+    const std::string name = (i == 0) ? "data" : ("data(" + std::to_string(i) + ")");
+    auto candidate = work_dir_ / name;
+
+    std::error_code ec;
+    std::filesystem::create_directories(candidate, ec);
+    if (ec) {
+      continue;
+    }
+
+    auto lock = std::make_unique<DataSlotLock>();
+    if (!lock->try_lock(candidate / ".slot.lock")) {
+      continue;
+    }
+
+    lock->dir = candidate;
+    data_lock_ = std::move(lock);
+    data_dir_ = candidate;
+    return true;
   }
-  return true;
+
+  error = "cannot lock data directory slot";
+  return false;
 }
 
 bool App::init_profile(std::string &error) {
@@ -939,7 +1016,8 @@ std::string App::self_json() const {
   os << '{';
   os << "\"id\":\"" << json_escape(self_id_) << "\",";
   os << "\"name\":\"" << json_escape(self_name_) << "\",";
-  os << "\"workDir\":\"" << json_escape(work_dir_.string()) << "\"";
+  os << "\"workDir\":\"" << json_escape(work_dir_.string()) << "\",";
+  os << "\"dataDir\":\"" << json_escape(data_dir_.string()) << "\"";
   os << '}';
   return os.str();
 }
