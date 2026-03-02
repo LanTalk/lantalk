@@ -387,6 +387,8 @@ int main(int argc, char* argv[]) {
     app.setApplicationName("LanTalk");
 
     try {
+        NetworkRuntime runtime;
+        (void)runtime;
         ChatWindow window;
         window.show();
         return app.exec();
