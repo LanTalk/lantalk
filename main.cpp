@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -23,6 +24,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <commdlg.h>
 #include <windows.h>
 #pragma comment(lib, "Ws2_32.lib")
 #else
@@ -384,6 +386,7 @@ public:
     }
 
     bool init() {
+        setLastError("");
         if (!loadOrCreateConfig()) {
             return false;
         }
@@ -399,8 +402,10 @@ public:
         return true;
     }
 
-    void run() {
-        running_.store(true);
+    bool startAsync() {
+        if (running_.exchange(true)) {
+            return true;
+        }
         discoveryRecvThread_ = std::thread(&LanTalkApp::discoveryRecvLoop, this);
         discoverySendThread_ = std::thread(&LanTalkApp::discoverySendLoop, this);
         serverThread_ = std::thread(&LanTalkApp::serverLoop, this);
@@ -409,10 +414,97 @@ public:
         printLine("Data directory: " + dataDir_.string());
         printLine("Local user: " + config_.userName + "  UserID: " + config_.userId +
                   "  Listen: " + std::to_string(config_.listenPort));
+        return true;
+    }
+
+    void run() {
+        startAsync();
         printHelp();
 
         inputLoop();
         stop();
+    }
+
+    void shutdown() {
+        stop();
+    }
+
+    std::vector<Peer> snapshotPeers() {
+        return getPeerSnapshot();
+    }
+
+    bool sendTextToUserId(const std::string& userId, const std::string& text, std::string* errorOut = nullptr) {
+        Peer peer;
+        if (!getPeerByUserId(userId, peer)) {
+            if (errorOut != nullptr) {
+                *errorOut = "Peer is offline.";
+            }
+            return false;
+        }
+        if (!sendTextToPeer(peer, text)) {
+            if (errorOut != nullptr) {
+                *errorOut = "Failed to send message.";
+            }
+            return false;
+        }
+        appendLog("OUT MSG to=" + peer.name + "(" + peer.ip + ") text=" + text);
+        return true;
+    }
+
+    bool sendFileToUserId(const std::string& userId, const fs::path& filePath, std::string* errorOut = nullptr) {
+        Peer peer;
+        if (!getPeerByUserId(userId, peer)) {
+            if (errorOut != nullptr) {
+                *errorOut = "Peer is offline.";
+            }
+            return false;
+        }
+        if (!sendFileToPeer(peer, filePath)) {
+            if (errorOut != nullptr) {
+                *errorOut = "Failed to send file.";
+            }
+            return false;
+        }
+        appendLog("OUT FILE to=" + peer.name + "(" + peer.ip + ") path=" + filePath.string());
+        return true;
+    }
+
+    bool updateLocalUserName(const std::string& newName, std::string* errorOut = nullptr) {
+        std::string safeName = sanitizeHelloField(newName);
+        if (safeName.empty()) {
+            if (errorOut != nullptr) {
+                *errorOut = "Name cannot be empty.";
+            }
+            return false;
+        }
+        config_.userName = safeName;
+        if (!saveConfig()) {
+            if (errorOut != nullptr) {
+                *errorOut = "Failed to save name.";
+            }
+            return false;
+        }
+        broadcastHello();
+        printLine("Name updated to: " + config_.userName);
+        return true;
+    }
+
+    Config configCopy() const {
+        return config_;
+    }
+
+    std::string dataDirString() const {
+        return dataDir_.string();
+    }
+
+    std::string lastError() const {
+        std::lock_guard<std::mutex> lock(errorMutex_);
+        return lastError_;
+    }
+
+    void setEventCallback(std::function<void(const std::string&)> cb) {
+        std::lock_guard<std::mutex> lock(eventMutex_);
+        eventCallback_ = std::move(cb);
     }
 
 private:
@@ -420,7 +512,7 @@ private:
         std::error_code ec;
         fs::create_directories(recvDir_, ec);
         if (ec) {
-            std::cerr << "Failed to create data directory: " << ec.message() << '\n';
+            setLastError("Failed to create data directory: " + ec.message());
             return false;
         }
 
@@ -498,7 +590,7 @@ private:
     bool saveConfig() {
         std::ofstream out(configPath_, std::ios::trunc);
         if (!out) {
-            std::cerr << "Failed to write config: " << configPath_ << '\n';
+            setLastError("Failed to write config: " + configPath_.string());
             return false;
         }
         out << "username=" << config_.userName << '\n';
@@ -536,11 +628,11 @@ private:
         std::string mutexName = "LanTalkMutex_" + shortHashHex(lockIdentity);
         instanceMutex_ = CreateMutexA(nullptr, TRUE, mutexName.c_str());
         if (instanceMutex_ == nullptr) {
-            std::cerr << "Failed to create single-instance mutex.\n";
+            setLastError("Failed to create single-instance mutex.");
             return false;
         }
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            std::cerr << "This executable is already running in current directory.\n";
+            setLastError("This executable is already running in current directory.");
             CloseHandle(instanceMutex_);
             instanceMutex_ = nullptr;
             return false;
@@ -549,11 +641,11 @@ private:
         lockFilePath_ = dataDir_ / ".instance.lock";
         lockFd_ = open(lockFilePath_.string().c_str(), O_RDWR | O_CREAT, 0644);
         if (lockFd_ < 0) {
-            std::cerr << "Failed to create lock file: " << lockFilePath_ << '\n';
+            setLastError("Failed to create lock file: " + lockFilePath_.string());
             return false;
         }
         if (flock(lockFd_, LOCK_EX | LOCK_NB) != 0) {
-            std::cerr << "This executable is already running in current directory.\n";
+            setLastError("This executable is already running in current directory.");
             close(lockFd_);
             lockFd_ = -1;
             return false;
@@ -587,7 +679,7 @@ private:
     bool initDiscoverySocket() {
         udpSock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (udpSock_ == kInvalidSocket) {
-            std::cerr << "Failed to create discovery socket.\n";
+            setLastError("Failed to create discovery socket.");
             return false;
         }
 
@@ -601,7 +693,7 @@ private:
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
         if (bind(udpSock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-            std::cerr << "Failed to bind discovery socket.\n";
+            setLastError("Failed to bind discovery socket.");
             closeSocket(udpSock_);
             udpSock_ = kInvalidSocket;
             return false;
@@ -638,7 +730,7 @@ private:
         }
 
         if (chosenSocket == kInvalidSocket) {
-            std::cerr << "Failed to open TCP listen socket.\n";
+            setLastError("Failed to open TCP listen socket.");
             return false;
         }
 
@@ -1362,6 +1454,21 @@ private:
         return true;
     }
 
+    bool getPeerByUserId(const std::string& userId, Peer& outPeer) {
+        std::lock_guard<std::mutex> lock(peersMutex_);
+        auto it = peers_.find(userId);
+        if (it == peers_.end()) {
+            return false;
+        }
+        outPeer = it->second;
+        return true;
+    }
+
+    void setLastError(const std::string& errorText) {
+        std::lock_guard<std::mutex> lock(errorMutex_);
+        lastError_ = errorText;
+    }
+
     void appendLog(const std::string& line) {
         std::lock_guard<std::mutex> lock(logMutex_);
         std::ofstream out(logPath_, std::ios::app);
@@ -1372,6 +1479,15 @@ private:
     }
 
     void printLine(const std::string& line) {
+        std::function<void(const std::string&)> callback;
+        {
+            std::lock_guard<std::mutex> lock(eventMutex_);
+            callback = eventCallback_;
+        }
+        if (callback) {
+            callback(line);
+            return;
+        }
         std::lock_guard<std::mutex> lock(ioMutex_);
         std::cout << line << '\n';
     }
@@ -1399,9 +1515,13 @@ private:
     std::mutex peersMutex_;
     std::mutex ioMutex_;
     std::mutex logMutex_;
+    std::mutex eventMutex_;
+    mutable std::mutex errorMutex_;
 
     std::map<std::string, Peer> peers_;
     std::mt19937_64 rng_;
+    std::function<void(const std::string&)> eventCallback_;
+    std::string lastError_;
     bool singleInstanceLocked_ = false;
 
 #ifdef _WIN32
@@ -1411,12 +1531,519 @@ private:
 #endif
 };
 
+#ifdef _WIN32
+constexpr UINT kMsgLogLine = WM_APP + 1;
+constexpr UINT_PTR kTimerPeerRefresh = 1;
+
+enum ControlId : int {
+    kCtlPeerList = 1001,
+    kCtlLogEdit = 1002,
+    kCtlInputEdit = 1003,
+    kCtlSendBtn = 1004,
+    kCtlFileBtn = 1005,
+    kCtlNameEdit = 1006,
+    kCtlRenameBtn = 1007,
+    kCtlStatus = 1008,
+};
+
+class WinGuiApp {
+public:
+    int run(HINSTANCE instance, int showCmd) {
+        instance_ = instance;
+
+        NetworkRuntime runtime;
+        (void)runtime;
+
+        app_.setEventCallback([this](const std::string& line) {
+            if (hwnd_ == nullptr) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(pendingLogMutex_);
+                pendingLogs_.push_back(line);
+            }
+            PostMessageA(hwnd_, kMsgLogLine, 0, 0);
+        });
+
+        if (!app_.init()) {
+            const std::string errorText = app_.lastError().empty() ? "Initialization failed." : app_.lastError();
+            MessageBoxA(nullptr, errorText.c_str(), "LanTalk", MB_ICONERROR | MB_OK);
+            return 1;
+        }
+
+        if (!registerWindowClass()) {
+            MessageBoxA(nullptr, "Failed to register window class.", "LanTalk", MB_ICONERROR | MB_OK);
+            app_.shutdown();
+            return 1;
+        }
+
+        hwnd_ = CreateWindowExA(0,
+                                windowClassName(),
+                                "LanTalk",
+                                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                                CW_USEDEFAULT,
+                                CW_USEDEFAULT,
+                                1100,
+                                720,
+                                nullptr,
+                                nullptr,
+                                instance_,
+                                this);
+        if (hwnd_ == nullptr) {
+            MessageBoxA(nullptr, "Failed to create main window.", "LanTalk", MB_ICONERROR | MB_OK);
+            app_.shutdown();
+            return 1;
+        }
+
+        ShowWindow(hwnd_, showCmd);
+        UpdateWindow(hwnd_);
+
+        app_.startAsync();
+        started_ = true;
+        refreshStatusBar();
+        refreshPeerList();
+        SetTimer(hwnd_, kTimerPeerRefresh, 1000, nullptr);
+
+        MSG msg{};
+        while (GetMessageA(&msg, nullptr, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        return static_cast<int>(msg.wParam);
+    }
+
+private:
+    static const char* windowClassName() {
+        return "LanTalkMainWindow";
+    }
+
+    static LRESULT CALLBACK setupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (msg == WM_NCCREATE) {
+            const auto* cs = reinterpret_cast<const CREATESTRUCTA*>(lParam);
+            auto* self = static_cast<WinGuiApp*>(cs->lpCreateParams);
+            SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+            return self->wndProc(hwnd, msg, wParam, lParam);
+        }
+        return DefWindowProcA(hwnd, msg, wParam, lParam);
+    }
+
+    static LRESULT CALLBACK forwardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        auto* self = reinterpret_cast<WinGuiApp*>(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
+        if (self == nullptr) {
+            return DefWindowProcA(hwnd, msg, wParam, lParam);
+        }
+        return self->wndProc(hwnd, msg, wParam, lParam);
+    }
+
+    bool registerWindowClass() const {
+        WNDCLASSEXA wc{};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = &WinGuiApp::setupWndProc;
+        wc.hInstance = instance_;
+        wc.hCursor = LoadCursorA(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.lpszClassName = windowClassName();
+        if (RegisterClassExA(&wc) != 0) {
+            return true;
+        }
+        return GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
+
+    void initControls(HWND hwnd) {
+        font_ = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+        peerList_ = CreateWindowExA(WS_EX_CLIENTEDGE,
+                                    "LISTBOX",
+                                    "",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
+                                    0,
+                                    0,
+                                    100,
+                                    100,
+                                    hwnd,
+                                    reinterpret_cast<HMENU>(static_cast<intptr_t>(kCtlPeerList)),
+                                    instance_,
+                                    nullptr);
+
+        logEdit_ = CreateWindowExA(WS_EX_CLIENTEDGE,
+                                   "EDIT",
+                                   "",
+                                   WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
+                                   0,
+                                   0,
+                                   100,
+                                   100,
+                                   hwnd,
+                                   reinterpret_cast<HMENU>(static_cast<intptr_t>(kCtlLogEdit)),
+                                   instance_,
+                                   nullptr);
+
+        inputEdit_ = CreateWindowExA(WS_EX_CLIENTEDGE,
+                                     "EDIT",
+                                     "",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                     0,
+                                     0,
+                                     100,
+                                     24,
+                                     hwnd,
+                                     reinterpret_cast<HMENU>(static_cast<intptr_t>(kCtlInputEdit)),
+                                     instance_,
+                                     nullptr);
+
+        sendBtn_ = CreateWindowExA(0,
+                                   "BUTTON",
+                                   "Send",
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                   0,
+                                   0,
+                                   80,
+                                   24,
+                                   hwnd,
+                                   reinterpret_cast<HMENU>(static_cast<intptr_t>(kCtlSendBtn)),
+                                   instance_,
+                                   nullptr);
+
+        fileBtn_ = CreateWindowExA(0,
+                                   "BUTTON",
+                                   "Send File",
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                   0,
+                                   0,
+                                   90,
+                                   24,
+                                   hwnd,
+                                   reinterpret_cast<HMENU>(static_cast<intptr_t>(kCtlFileBtn)),
+                                   instance_,
+                                   nullptr);
+
+        nameEdit_ = CreateWindowExA(WS_EX_CLIENTEDGE,
+                                    "EDIT",
+                                    "",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                    0,
+                                    0,
+                                    100,
+                                    24,
+                                    hwnd,
+                                    reinterpret_cast<HMENU>(static_cast<intptr_t>(kCtlNameEdit)),
+                                    instance_,
+                                    nullptr);
+
+        renameBtn_ = CreateWindowExA(0,
+                                     "BUTTON",
+                                     "Set Name",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                     0,
+                                     0,
+                                     90,
+                                     24,
+                                     hwnd,
+                                     reinterpret_cast<HMENU>(static_cast<intptr_t>(kCtlRenameBtn)),
+                                     instance_,
+                                     nullptr);
+
+        statusStatic_ = CreateWindowExA(0,
+                                        "STATIC",
+                                        "",
+                                        WS_CHILD | WS_VISIBLE,
+                                        0,
+                                        0,
+                                        100,
+                                        24,
+                                        hwnd,
+                                        reinterpret_cast<HMENU>(static_cast<intptr_t>(kCtlStatus)),
+                                        instance_,
+                                        nullptr);
+
+        const HWND controls[] = {peerList_, logEdit_, inputEdit_, sendBtn_, fileBtn_, nameEdit_, renameBtn_, statusStatic_};
+        for (HWND control : controls) {
+            SendMessageA(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+        }
+
+        const Config cfg = app_.configCopy();
+        SetWindowTextA(nameEdit_, cfg.userName.c_str());
+    }
+
+    static std::string getWindowTextString(HWND control) {
+        const int length = GetWindowTextLengthA(control);
+        if (length <= 0) {
+            return "";
+        }
+        std::string text(static_cast<size_t>(length) + 1, '\0');
+        if (length > 0) {
+            GetWindowTextA(control, text.data(), length + 1);
+        }
+        text.resize(static_cast<size_t>(length));
+        return text;
+    }
+
+    void layoutControls(int width, int height) {
+        const int margin = 8;
+        const int leftWidth = std::max(220, std::min(320, width / 4));
+        const int rightX = leftWidth + margin * 2;
+        const int rightWidth = width - rightX - margin;
+        const int topRowHeight = 26;
+        const int secondRowHeight = 28;
+        const int bottomRowHeight = 30;
+
+        MoveWindow(peerList_, margin, margin, leftWidth, height - margin * 2, TRUE);
+        MoveWindow(statusStatic_, rightX, margin, rightWidth, topRowHeight, TRUE);
+
+        const int renameBtnWidth = 90;
+        MoveWindow(nameEdit_, rightX, margin + topRowHeight + margin, rightWidth - renameBtnWidth - margin, secondRowHeight, TRUE);
+        MoveWindow(renameBtn_,
+                   rightX + rightWidth - renameBtnWidth,
+                   margin + topRowHeight + margin,
+                   renameBtnWidth,
+                   secondRowHeight,
+                   TRUE);
+
+        const int bottomY = height - margin - bottomRowHeight;
+        const int sendWidth = 80;
+        const int fileWidth = 90;
+        MoveWindow(inputEdit_,
+                   rightX,
+                   bottomY,
+                   rightWidth - sendWidth - fileWidth - margin * 2,
+                   bottomRowHeight,
+                   TRUE);
+        MoveWindow(sendBtn_, rightX + rightWidth - sendWidth - fileWidth - margin, bottomY, sendWidth, bottomRowHeight, TRUE);
+        MoveWindow(fileBtn_, rightX + rightWidth - fileWidth, bottomY, fileWidth, bottomRowHeight, TRUE);
+
+        const int logTop = margin + topRowHeight + margin + secondRowHeight + margin;
+        const int logHeight = bottomY - logTop - margin;
+        MoveWindow(logEdit_, rightX, logTop, rightWidth, std::max(100, logHeight), TRUE);
+    }
+
+    void appendLogLine(const std::string& line) {
+        const int len = GetWindowTextLengthA(logEdit_);
+        SendMessageA(logEdit_, EM_SETSEL, static_cast<WPARAM>(len), static_cast<LPARAM>(len));
+        const std::string withNewLine = line + "\r\n";
+        SendMessageA(logEdit_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(withNewLine.c_str()));
+        SendMessageA(logEdit_, EM_SCROLLCARET, 0, 0);
+    }
+
+    void refreshStatusBar() {
+        const Config cfg = app_.configCopy();
+        std::string text = "Local: " + cfg.userName + " | UserID: " + cfg.userId + " | Data: " + app_.dataDirString();
+        SetWindowTextA(statusStatic_, text.c_str());
+    }
+
+    void refreshPeerList() {
+        std::string selectedUserId;
+        const int selectedIndex = static_cast<int>(SendMessageA(peerList_, LB_GETCURSEL, 0, 0));
+        if (selectedIndex >= 0 && selectedIndex < static_cast<int>(peerUserIds_.size())) {
+            selectedUserId = peerUserIds_[static_cast<size_t>(selectedIndex)];
+        }
+
+        const auto peers = app_.snapshotPeers();
+        peerUserIds_.clear();
+        SendMessageA(peerList_, LB_RESETCONTENT, 0, 0);
+        for (const Peer& peer : peers) {
+            std::ostringstream oss;
+            oss << peer.name << " [" << peer.userId << "] " << peer.ip << ':' << peer.port;
+            const std::string line = oss.str();
+            SendMessageA(peerList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+            peerUserIds_.push_back(peer.userId);
+        }
+
+        if (!selectedUserId.empty()) {
+            for (size_t i = 0; i < peerUserIds_.size(); ++i) {
+                if (peerUserIds_[i] == selectedUserId) {
+                    SendMessageA(peerList_, LB_SETCURSEL, static_cast<WPARAM>(i), 0);
+                    return;
+                }
+            }
+        }
+        if (!peerUserIds_.empty()) {
+            SendMessageA(peerList_, LB_SETCURSEL, 0, 0);
+        }
+    }
+
+    bool selectedPeerUserId(std::string& outUserId) const {
+        const int index = static_cast<int>(SendMessageA(peerList_, LB_GETCURSEL, 0, 0));
+        if (index < 0 || index >= static_cast<int>(peerUserIds_.size())) {
+            return false;
+        }
+        outUserId = peerUserIds_[static_cast<size_t>(index)];
+        return true;
+    }
+
+    std::string peerNameByUserId(const std::string& userId) const {
+        const auto peers = app_.snapshotPeers();
+        for (const auto& peer : peers) {
+            if (peer.userId == userId) {
+                return peer.name;
+            }
+        }
+        return userId;
+    }
+
+    void onSendMessage() {
+        std::string userId;
+        if (!selectedPeerUserId(userId)) {
+            MessageBoxA(hwnd_, "Please select a peer first.", "LanTalk", MB_ICONINFORMATION | MB_OK);
+            return;
+        }
+        std::string text = trim(getWindowTextString(inputEdit_));
+        if (text.empty()) {
+            return;
+        }
+        std::string errorText;
+        if (!app_.sendTextToUserId(userId, text, &errorText)) {
+            MessageBoxA(hwnd_, errorText.c_str(), "LanTalk", MB_ICONERROR | MB_OK);
+            refreshPeerList();
+            return;
+        }
+        appendLogLine("[Sent] to " + peerNameByUserId(userId) + ": " + text);
+        SetWindowTextA(inputEdit_, "");
+    }
+
+    void onSendFile() {
+        std::string userId;
+        if (!selectedPeerUserId(userId)) {
+            MessageBoxA(hwnd_, "Please select a peer first.", "LanTalk", MB_ICONINFORMATION | MB_OK);
+            return;
+        }
+
+        char pathBuffer[MAX_PATH] = {0};
+        OPENFILENAMEA ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hwnd_;
+        ofn.lpstrFile = pathBuffer;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.lpstrFilter = "All Files\0*.*\0";
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (!GetOpenFileNameA(&ofn)) {
+            return;
+        }
+
+        std::string errorText;
+        if (!app_.sendFileToUserId(userId, fs::path(pathBuffer), &errorText)) {
+            MessageBoxA(hwnd_, errorText.c_str(), "LanTalk", MB_ICONERROR | MB_OK);
+            refreshPeerList();
+            return;
+        }
+        appendLogLine("[Sent file] to " + peerNameByUserId(userId) + ": " + fs::path(pathBuffer).filename().string());
+    }
+
+    void onRename() {
+        std::string name = trim(getWindowTextString(nameEdit_));
+        std::string errorText;
+        if (!app_.updateLocalUserName(name, &errorText)) {
+            MessageBoxA(hwnd_, errorText.c_str(), "LanTalk", MB_ICONERROR | MB_OK);
+            return;
+        }
+        refreshStatusBar();
+    }
+
+    void shutdownApp() {
+        if (!started_) {
+            return;
+        }
+        app_.setEventCallback(nullptr);
+        app_.shutdown();
+        started_ = false;
+    }
+
+    LRESULT wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        switch (msg) {
+            case WM_NCCREATE:
+                SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&WinGuiApp::forwardWndProc));
+                return TRUE;
+            case WM_CREATE:
+                initControls(hwnd);
+                return 0;
+            case WM_SIZE:
+                layoutControls(LOWORD(lParam), HIWORD(lParam));
+                return 0;
+            case WM_COMMAND:
+                switch (LOWORD(wParam)) {
+                    case kCtlSendBtn:
+                        onSendMessage();
+                        return 0;
+                    case kCtlFileBtn:
+                        onSendFile();
+                        return 0;
+                    case kCtlRenameBtn:
+                        onRename();
+                        return 0;
+                    default:
+                        break;
+                }
+                break;
+            case WM_TIMER:
+                if (wParam == kTimerPeerRefresh) {
+                    refreshPeerList();
+                    refreshStatusBar();
+                }
+                return 0;
+            case kMsgLogLine: {
+                std::vector<std::string> batch;
+                {
+                    std::lock_guard<std::mutex> lock(pendingLogMutex_);
+                    batch.swap(pendingLogs_);
+                }
+                for (const auto& line : batch) {
+                    appendLogLine(line);
+                }
+                return 0;
+            }
+            case WM_CLOSE:
+                shutdownApp();
+                DestroyWindow(hwnd);
+                return 0;
+            case WM_DESTROY:
+                KillTimer(hwnd, kTimerPeerRefresh);
+                PostQuitMessage(0);
+                return 0;
+            default:
+                break;
+        }
+        return DefWindowProcA(hwnd, msg, wParam, lParam);
+    }
+
+private:
+    HINSTANCE instance_ = nullptr;
+    HWND hwnd_ = nullptr;
+    HWND peerList_ = nullptr;
+    HWND logEdit_ = nullptr;
+    HWND inputEdit_ = nullptr;
+    HWND sendBtn_ = nullptr;
+    HWND fileBtn_ = nullptr;
+    HWND nameEdit_ = nullptr;
+    HWND renameBtn_ = nullptr;
+    HWND statusStatic_ = nullptr;
+    HFONT font_ = nullptr;
+    std::mutex pendingLogMutex_;
+    std::vector<std::string> pendingLogs_;
+
+    LanTalkApp app_;
+    bool started_ = false;
+    std::vector<std::string> peerUserIds_;
+};
+#endif
+
+#ifdef _WIN32
+int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCmd) {
+    try {
+        WinGuiApp gui;
+        return gui.run(instance, showCmd);
+    } catch (const std::exception& ex) {
+        MessageBoxA(nullptr, ex.what(), "LanTalk", MB_ICONERROR | MB_OK);
+        return 1;
+    }
+}
+#else
 int main() {
     try {
         NetworkRuntime runtime;
         (void)runtime;
         LanTalkApp app;
         if (!app.init()) {
+            std::cerr << app.lastError() << '\n';
             return 1;
         }
         app.run();
@@ -1426,3 +2053,4 @@ int main() {
         return 1;
     }
 }
+#endif

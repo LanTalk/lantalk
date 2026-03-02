@@ -5,10 +5,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_executable(lantalk main.cpp)
-
 if(WIN32)
-  target_link_libraries(lantalk PRIVATE ws2_32)
+  add_executable(lantalk WIN32 main.cpp)
+  target_link_libraries(lantalk PRIVATE ws2_32 comdlg32)
+else()
+  add_executable(lantalk main.cpp)
 endif()
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
