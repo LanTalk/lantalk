@@ -29,6 +29,8 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void changeEvent(QEvent* event) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
@@ -102,6 +104,9 @@ private:
 
     QWidget* titleBar_ = nullptr;
     QLabel* chatTitleLabel_ = nullptr;
+    QPushButton* minBtn_ = nullptr;
+    QPushButton* maxBtn_ = nullptr;
+    QPushButton* closeBtn_ = nullptr;
     QPushButton* viewProfileBtn_ = nullptr;
 
     QPushButton* selfAvatarBtn_ = nullptr;
