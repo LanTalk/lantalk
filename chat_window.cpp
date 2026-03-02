@@ -28,6 +28,7 @@
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QMouseEvent>
 #include <QNetworkInterface>
 #include <QPainter>
 #include <QPainterPath>
@@ -42,7 +43,6 @@
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolButton>
-#include <QListView>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -317,13 +317,40 @@ bool ChatWindow::eventFilter(QObject* watched, QEvent* event) {
         }
     }
 
+    if (watched == titleBar_) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                draggingWindow_ = true;
+                dragOffset_ = mouseEvent->globalPosition().toPoint() - frameGeometry().topLeft();
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseMove) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (draggingWindow_ && (mouseEvent->buttons() & Qt::LeftButton) && !isMaximized()) {
+                move(mouseEvent->globalPosition().toPoint() - dragOffset_);
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseButtonRelease) {
+            draggingWindow_ = false;
+            return true;
+        } else if (event->type() == QEvent::MouseButtonDblClick) {
+            if (isMaximized()) {
+                showNormal();
+            } else {
+                showMaximized();
+            }
+            return true;
+        }
+    }
+
     return QMainWindow::eventFilter(watched, event);
 }
 
 void ChatWindow::setupUi() {
     setWindowTitle("LanTalk");
     setWindowIcon(makeAppIcon());
-    setWindowFlags(Qt::Window);
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     resize(1320, 820);
 
     auto* central = new QWidget(this);
@@ -386,22 +413,48 @@ void ChatWindow::setupUi() {
 
     titleBar_ = new QFrame(chatPane);
     titleBar_->setObjectName("TitleBar");
-    titleBar_->setFixedHeight(58);
+    titleBar_->setFixedHeight(72);
     auto* titleLayout = new QHBoxLayout(titleBar_);
-    titleLayout->setContentsMargins(18, 8, 12, 8);
+    titleLayout->setContentsMargins(18, 8, 8, 7);
     titleLayout->setSpacing(10);
 
     chatTitleLabel_ = new QLabel("聊天窗口", titleBar_);
     chatTitleLabel_->setObjectName("ChatTitle");
 
+    auto* titleRight = new QVBoxLayout();
+    titleRight->setContentsMargins(0, 0, 0, 0);
+    titleRight->setSpacing(4);
+
+    auto* controlRow = new QHBoxLayout();
+    controlRow->setContentsMargins(0, 0, 0, 0);
+    controlRow->setSpacing(0);
+
+    minBtn_ = new QPushButton(QString::fromUtf8("−"), titleBar_);
+    minBtn_->setObjectName("WindowBtn");
+    minBtn_->setFixedSize(46, 30);
+
+    maxBtn_ = new QPushButton(QString::fromUtf8("□"), titleBar_);
+    maxBtn_->setObjectName("WindowBtn");
+    maxBtn_->setFixedSize(46, 30);
+
+    closeBtn_ = new QPushButton(QString::fromUtf8("×"), titleBar_);
+    closeBtn_->setObjectName("CloseBtn");
+    closeBtn_->setFixedSize(46, 30);
+
     viewProfileBtn_ = new QPushButton("查看资料", titleBar_);
     viewProfileBtn_->setObjectName("ProfileBtn");
     viewProfileBtn_->setCursor(Qt::PointingHandCursor);
-    viewProfileBtn_->setFixedHeight(30);
+    viewProfileBtn_->setFixedHeight(24);
     viewProfileBtn_->setEnabled(false);
 
+    controlRow->addWidget(minBtn_);
+    controlRow->addWidget(maxBtn_);
+    controlRow->addWidget(closeBtn_);
+    titleRight->addLayout(controlRow);
+    titleRight->addWidget(viewProfileBtn_, 0, Qt::AlignRight);
+
     titleLayout->addWidget(chatTitleLabel_, 1, Qt::AlignVCenter);
-    titleLayout->addWidget(viewProfileBtn_, 0, Qt::AlignRight | Qt::AlignVCenter);
+    titleLayout->addLayout(titleRight);
 
     auto* chatContent = new QWidget(chatPane);
     auto* rightLayout = new QVBoxLayout(chatContent);
@@ -444,6 +497,7 @@ void ChatWindow::setupUi() {
     setCentralWidget(central);
 
     inputEdit_->installEventFilter(this);
+    titleBar_->installEventFilter(this);
 
     setStyleSheet(R"(
         QMainWindow { background: #f0f3f7; }
@@ -536,24 +590,48 @@ void ChatWindow::setupUi() {
             background: rgba(15,23,42,0.06);
         }
         QToolButton#SettingsBtn:hover { background: rgba(15,23,42,0.12); }
+        QPushButton#WindowBtn {
+            border: none;
+            border-radius: 0;
+            background: transparent;
+            color: #1f2937;
+            font-size: 12px;
+            font-family: Segoe UI;
+            min-height: 30px;
+            min-width: 46px;
+            padding: 0;
+        }
+        QPushButton#WindowBtn:hover { background: #e7ebf1; }
+        QPushButton#CloseBtn {
+            border: none;
+            border-radius: 0;
+            background: transparent;
+            color: #1f2937;
+            font-size: 12px;
+            font-family: Segoe UI;
+            min-height: 30px;
+            min-width: 46px;
+            padding: 0;
+        }
+        QPushButton#CloseBtn:hover {
+            background: #e81123;
+            color: #ffffff;
+        }
         QPushButton#ProfileBtn {
-            border: 1px solid #d7e0ee;
-            border-radius: 8px;
-            background: #f6f9ff;
+            border: none;
+            background: transparent;
             color: #1d4ed8;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
-            padding: 0 10px;
+            min-height: 22px;
+            padding: 0 6px;
         }
         QPushButton#ProfileBtn:hover {
-            background: #e9f1ff;
-            border-color: #b9d0f8;
             color: #1e40af;
+            text-decoration: underline;
         }
         QPushButton#ProfileBtn:disabled {
             color: #94a3b8;
-            background: #f8fafc;
-            border-color: #e2e8f0;
         }
     )");
 }
@@ -564,6 +642,18 @@ void ChatWindow::bindEvents() {
     connect(viewProfileBtn_, &QPushButton::clicked, this, [this]() { openContactProfileDialog(); });
     connect(sendBtn_, &QPushButton::clicked, this, [this]() { onSendMessage(); });
     connect(sendFileBtn_, &QPushButton::clicked, this, [this]() { onSendFile(); });
+
+    connect(minBtn_, &QPushButton::clicked, this, [this]() { showMinimized(); });
+    connect(maxBtn_, &QPushButton::clicked, this, [this]() {
+        if (isMaximized()) {
+            showNormal();
+        } else {
+            showMaximized();
+        }
+    });
+    connect(closeBtn_, &QPushButton::clicked, this, [this]() {
+        ::PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND, SC_CLOSE, 0);
+    });
 
     connect(contactList_, &QListWidget::currentItemChanged, this,
             [this](QListWidgetItem* current, QListWidgetItem*) {
@@ -631,7 +721,7 @@ void ChatWindow::openSettingsDialog() {
 
     QDialog dialog(this);
     dialog.setWindowTitle("个人设置");
-    dialog.resize(560, 520);
+    dialog.resize(430, 360);
 
     auto* root = new QVBoxLayout(&dialog);
     root->setContentsMargins(14, 14, 14, 14);
@@ -642,33 +732,10 @@ void ChatWindow::openSettingsDialog() {
     avatarLabel->setFixedSize(72, 72);
     avatarLabel->setPixmap(makeRoundAvatar(QImage(selectedAvatar), 72, QString::fromStdString(config.userId)));
 
-    auto* pickAvatarBtn = new QPushButton("从本地图片选择", &dialog);
+    auto* pickAvatarBtn = new QPushButton("上传头像", &dialog);
     avatarRow->addWidget(avatarLabel, 0, Qt::AlignLeft | Qt::AlignVCenter);
     avatarRow->addWidget(pickAvatarBtn, 0, Qt::AlignLeft | Qt::AlignVCenter);
     avatarRow->addStretch(1);
-
-    auto* avatarLibLabel = new QLabel("默认头像库（内置）", &dialog);
-    avatarLibLabel->setStyleSheet("font-weight:700;color:#0f172a;");
-
-    auto* avatarList = new QListWidget(&dialog);
-    avatarList->setViewMode(QListView::IconMode);
-    avatarList->setFlow(QListView::LeftToRight);
-    avatarList->setMovement(QListView::Static);
-    avatarList->setWrapping(true);
-    avatarList->setResizeMode(QListView::Adjust);
-    avatarList->setSpacing(8);
-    avatarList->setIconSize(QSize(52, 52));
-    avatarList->setFixedHeight(148);
-
-    for (const QString& path : defaultAvatarPaths_) {
-        auto* item = new QListWidgetItem(QIcon(makeRoundAvatar(QImage(path), 52, path)), "");
-        item->setData(Qt::UserRole, path);
-        item->setToolTip(path);
-        avatarList->addItem(item);
-        if (path == selectedAvatar) {
-            avatarList->setCurrentItem(item);
-        }
-    }
 
     auto* form = new QFormLayout();
     form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -708,28 +775,12 @@ void ChatWindow::openSettingsDialog() {
         }
         selectedAvatar = path;
         avatarLabel->setPixmap(makeRoundAvatar(image, 72, QString::fromStdString(config.userId)));
-        avatarList->clearSelection();
-    });
-
-    connect(avatarList, &QListWidget::currentItemChanged, &dialog, [&](QListWidgetItem* current, QListWidgetItem*) {
-        if (current == nullptr) {
-            return;
-        }
-        const QString path = current->data(Qt::UserRole).toString();
-        QImage image(path);
-        if (image.isNull()) {
-            return;
-        }
-        selectedAvatar = path;
-        avatarLabel->setPixmap(makeRoundAvatar(image, 72, QString::fromStdString(config.userId)));
     });
 
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
     root->addLayout(avatarRow);
-    root->addWidget(avatarLibLabel);
-    root->addWidget(avatarList);
     root->addLayout(form);
     root->addStretch(1);
     root->addWidget(buttons);

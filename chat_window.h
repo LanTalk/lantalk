@@ -5,6 +5,7 @@
 #include <QEvent>
 #include <QMainWindow>
 #include <QByteArray>
+#include <QPoint>
 #include <QString>
 #include <QStringList>
 
@@ -102,6 +103,9 @@ private:
 
     QWidget* titleBar_ = nullptr;
     QLabel* chatTitleLabel_ = nullptr;
+    QPushButton* minBtn_ = nullptr;
+    QPushButton* maxBtn_ = nullptr;
+    QPushButton* closeBtn_ = nullptr;
     QPushButton* viewProfileBtn_ = nullptr;
 
     QPushButton* selfAvatarBtn_ = nullptr;
@@ -116,4 +120,7 @@ private:
     QString activeContactId_;
     QString selfAvatarPath_;
     QStringList defaultAvatarPaths_;
+
+    bool draggingWindow_ = false;
+    QPoint dragOffset_;
 };
