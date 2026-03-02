@@ -14,6 +14,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.3"
+          host: "windows"
+          target: "desktop"
+          arch: "win64_msvc2022_64"
+
       - name: Configure (x64)
         run: cmake -S . -B build -A x64
 
@@ -25,16 +33,18 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path out -Force | Out-Null
           if (Test-Path "build/Release/lantalk.exe") {
-            Copy-Item "build/Release/lantalk.exe" "out/LanTalk.exe" -Force
+            $exe = "build/Release/lantalk.exe"
           } elseif (Test-Path "build/lantalk.exe") {
-            Copy-Item "build/lantalk.exe" "out/LanTalk.exe" -Force
+            $exe = "build/lantalk.exe"
           } else {
             throw "lantalk.exe not found"
           }
+          & windeployqt --release --no-translations --compiler-runtime --dir out $exe
+          Copy-Item $exe "out/LanTalk.exe" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: LanTalk-windows-x64
-          path: out/LanTalk.exe
+          path: out/
           if-no-files-found: error

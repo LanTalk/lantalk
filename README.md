@@ -1,8 +1,8 @@
 # LanTalk
 
-LanTalk 是一个 Windows x64 的局域网聊天工具。
+LanTalk 是一个仅支持 Windows x64 的局域网聊天工具。
 
-- 原生图形界面交互（在线用户列表、消息窗口、输入区、文件发送）
+- 现代图形界面（简约布局）
 - 自动发现同一局域网内在线用户
 - 支持文字消息和文件发送
 - 免安装，启动后自动在运行目录保存数据
@@ -12,6 +12,7 @@ LanTalk 是一个 Windows x64 的局域网聊天工具。
 ## 技术栈
 
 - C++17
-- CMake
+- Qt 6 Widgets（UI）
 - WinSock2（UDP 广播发现 + TCP 消息/文件传输）
-- GitHub Actions（Windows x64 自动编译并产出可下载 Artifact）
+- CMake
+- GitHub Actions（Windows x64 自动编译并打包可运行产物）
