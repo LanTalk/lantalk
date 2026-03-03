@@ -479,13 +479,13 @@ void ChatWindow::setupUi() {
     railPane_ = rail;
     rail->setFixedWidth(82);
     auto* railLayout = new QVBoxLayout(rail);
-    railLayout->setContentsMargins(10, 12, 10, 12);
+    railLayout->setContentsMargins(10, 10, 10, 10);
     railLayout->setSpacing(10);
 
     selfAvatarBtn_ = new QPushButton(rail);
     selfAvatarBtn_->setObjectName("AvatarBtn");
-    selfAvatarBtn_->setFixedSize(56, 56);
-    selfAvatarBtn_->setIconSize(QSize(56, 56));
+    selfAvatarBtn_->setFixedSize(50, 50);
+    selfAvatarBtn_->setIconSize(QSize(50, 50));
     selfAvatarBtn_->setCursor(Qt::ArrowCursor);
     selfAvatarBtn_->setFocusPolicy(Qt::NoFocus);
     selfAvatarBtn_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
@@ -543,7 +543,7 @@ void ChatWindow::setupUi() {
     titleBar_->setObjectName("TitleBar");
     titleBar_->setFixedHeight(72);
     auto* titleLayout = new QHBoxLayout(titleBar_);
-    titleLayout->setContentsMargins(18, 0, 0, 7);
+    titleLayout->setContentsMargins(18, 0, 0, 5);
     titleLayout->setSpacing(10);
 
     chatTitleLabel_ = new QLabel("聊天窗口", titleBar_);
@@ -551,7 +551,7 @@ void ChatWindow::setupUi() {
 
     auto* titleRight = new QVBoxLayout();
     titleRight->setContentsMargins(0, 0, 0, 0);
-    titleRight->setSpacing(4);
+    titleRight->setSpacing(0);
 
     auto* controlRow = new QHBoxLayout();
     controlRow->setContentsMargins(0, 0, 0, 0);
@@ -588,10 +588,12 @@ void ChatWindow::setupUi() {
     controlRow->addWidget(maxBtn_);
     controlRow->addWidget(closeBtn_);
     titleRight->addLayout(controlRow);
+    titleRight->addSpacing(4);
     titleRight->addWidget(viewProfileBtn_, 0, Qt::AlignRight);
 
     titleLayout->addWidget(chatTitleLabel_, 1, Qt::AlignVCenter);
     titleLayout->addLayout(titleRight);
+    titleLayout->setAlignment(titleRight, Qt::AlignTop | Qt::AlignRight);
 
     auto* chatContent = new QWidget(chatPane);
     auto* rightLayout = new QVBoxLayout(chatContent);
@@ -604,7 +606,7 @@ void ChatWindow::setupUi() {
     auto* composeArea = new QWidget(chatContent);
     composeArea->setObjectName("ComposeArea");
     auto* composeLayout = new QVBoxLayout(composeArea);
-    composeLayout->setContentsMargins(14, 8, 14, 12);
+    composeLayout->setContentsMargins(12, 8, 12, 12);
     composeLayout->setSpacing(6);
 
     auto* toolsRow = new QHBoxLayout();
@@ -821,7 +823,7 @@ void ChatWindow::setupUi() {
         QToolButton#ComposeIconBtn:pressed { background: rgba(0, 0, 0, 0.12); }
         QPushButton#AvatarBtn {
             border: none;
-            border-radius: 14px;
+            border-radius: 12px;
             background: transparent;
             padding: 0;
         }
@@ -1813,9 +1815,9 @@ void ChatWindow::applySelfAvatar() {
         image.load(selfAvatarPath_);
     }
 
-    const QPixmap avatar = makeRoundAvatar(image, 56, seed);
+    const QPixmap avatar = makeRoundAvatar(image, 50, seed);
     selfAvatarBtn_->setIcon(QIcon(avatar));
-    selfAvatarBtn_->setIconSize(QSize(56, 56));
+    selfAvatarBtn_->setIconSize(QSize(50, 50));
 }
 
 QString ChatWindow::localIpSummary() const {
