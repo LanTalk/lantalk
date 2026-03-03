@@ -242,6 +242,22 @@ inline std::string stripQuotes(const std::string& input) {
     return input;
 }
 
+inline std::string pathToUtf8(const fs::path& path) {
+#if defined(_WIN32)
+    return path.u8string();
+#else
+    return path.string();
+#endif
+}
+
+inline fs::path pathFromUtf8(const std::string& text) {
+#if defined(_WIN32)
+    return fs::u8path(text);
+#else
+    return fs::path(text);
+#endif
+}
+
 inline std::string sanitizeHelloField(const std::string& text) {
     std::string out;
     out.reserve(text.size());
@@ -549,13 +565,13 @@ public:
             }
             return false;
         }
-        appendLog("OUT FILE to=" + peer.name + "(" + peer.ip + ") path=" + filePath.string());
+        appendLog("OUT FILE to=" + peer.name + "(" + peer.ip + ") path=" + pathToUtf8(filePath));
         MessageEvent event;
         event.peerUserId = peer.userId;
         event.peerName = peer.name;
         event.peerIp = peer.ip;
-        event.fileName = filePath.filename().string();
-        event.filePath = filePath.string();
+        event.fileName = pathToUtf8(filePath.filename());
+        event.filePath = pathToUtf8(filePath);
         event.incoming = false;
         event.isFile = true;
         event.timestamp = std::time(nullptr);
@@ -1025,9 +1041,9 @@ private:
                     continue;
                 }
                 if (sendFileToPeer(peer, filePath)) {
-                    const std::string name = filePath.filename().string();
+                    const std::string name = pathToUtf8(filePath.filename());
                     printLine("[Sent file] to " + peer.name + ": " + name);
-                    appendLog("OUT FILE to=" + peer.name + "(" + peer.ip + ") name=" + name + " path=" + filePath.string());
+                    appendLog("OUT FILE to=" + peer.name + "(" + peer.ip + ") name=" + name + " path=" + pathToUtf8(filePath));
                 } else {
                     printLine("Failed to send file.");
                 }
@@ -1433,7 +1449,7 @@ private:
             return false;
         }
 
-        std::string fileName = filePath.filename().string();
+        std::string fileName = pathToUtf8(filePath.filename());
         fileName = sanitizeFileName(fileName);
 
         socket_t sock = connectToPeer(peer, 5000);
@@ -1600,16 +1616,16 @@ private:
                         uint64_t size,
                         std::time_t sentTime) {
         const std::string stamp = formatTime(sentTime);
-        printLine("[" + stamp + "] [FILE] " + fromName + "(" + remoteIp + ") -> " + savePath.string() +
+        printLine("[" + stamp + "] [FILE] " + fromName + "(" + remoteIp + ") -> " + pathToUtf8(savePath) +
                   " (" + std::to_string(size) + " bytes)");
-        appendLog("IN FILE from=" + fromName + "(" + remoteIp + ") name=" + fileName + " save=" + savePath.string() +
+        appendLog("IN FILE from=" + fromName + "(" + remoteIp + ") name=" + fileName + " save=" + pathToUtf8(savePath) +
                   " bytes=" + std::to_string(size));
         MessageEvent event;
         event.peerUserId = fromUserId;
         event.peerName = fromName;
         event.peerIp = remoteIp;
         event.fileName = fileName;
-        event.filePath = savePath.string();
+        event.filePath = pathToUtf8(savePath);
         event.incoming = true;
         event.isFile = true;
         event.timestamp = sentTime;
@@ -1619,11 +1635,11 @@ private:
     fs::path uniqueFilePath(const std::string& sender, const std::string& originalName) {
         const std::string safeSender = sanitizeFileName(sender);
         const std::string safeName = sanitizeFileName(originalName);
-        const fs::path senderDir = recvDir_ / safeSender;
+        const fs::path senderDir = recvDir_ / pathFromUtf8(safeSender);
         std::error_code ec;
         fs::create_directories(senderDir, ec);
 
-        fs::path candidate = senderDir / safeName;
+        fs::path candidate = senderDir / pathFromUtf8(safeName);
         if (!fs::exists(candidate, ec)) {
             return candidate;
         }

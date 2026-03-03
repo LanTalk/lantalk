@@ -1075,7 +1075,8 @@ void ChatWindow::onSendFile() {
     }
 
     std::string error;
-    if (!app_.sendFileToUserId(userId.toStdString(), fs::path(filePath.toStdString()), &error)) {
+    const fs::path nativePath(filePath.toStdWString());
+    if (!app_.sendFileToUserId(userId.toStdString(), nativePath, &error)) {
         QMessageBox::warning(this, "发送失败", QString::fromStdString(error.empty() ? "文件发送失败。" : error));
     }
 }
