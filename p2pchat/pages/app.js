@@ -34,7 +34,7 @@ function loadConfig() {
     userId: crypto.randomUUID().replace(/-/g, "").slice(0, 16),
     name: `Web用户${Math.floor(Math.random() * 9000 + 1000)}`,
     avatar: randomAvatar(),
-    servers: [],
+    servers: ["https://lantalk-signal.lantalkchat9956.workers.dev"],
   };
 }
 

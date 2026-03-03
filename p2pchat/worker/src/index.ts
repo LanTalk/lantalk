@@ -61,11 +61,14 @@ function decideMode(selfPeer: PresenceRecord | undefined, otherPeer: PresenceRec
   return "ws";
 }
 
-export class SignalHub extends DurableObject {
+export class SignalHub {
+  private state: DurableObjectState;
+  private env: Env;
   private sockets = new Map<string, Set<WebSocket>>();
 
   constructor(state: DurableObjectState, env: Env) {
-    super(state, env);
+    this.state = state;
+    this.env = env;
   }
 
   async fetch(request: Request): Promise<Response> {
