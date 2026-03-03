@@ -262,7 +262,16 @@ QIcon makeContactAvatarIcon(const QString& avatarPayload, const QString& fallbac
     painter.setPen(QPen(Qt::white, 1.2));
     painter.setBrush(online ? QColor(34, 197, 94) : QColor(148, 163, 184));
     painter.drawEllipse(dotRect);
-    return QIcon(base);
+
+    // Keep avatar identical in selected/active states to avoid Qt palette tinting.
+    QIcon icon;
+    icon.addPixmap(base, QIcon::Normal, QIcon::Off);
+    icon.addPixmap(base, QIcon::Normal, QIcon::On);
+    icon.addPixmap(base, QIcon::Selected, QIcon::Off);
+    icon.addPixmap(base, QIcon::Selected, QIcon::On);
+    icon.addPixmap(base, QIcon::Active, QIcon::Off);
+    icon.addPixmap(base, QIcon::Active, QIcon::On);
+    return icon;
 }
 }  // namespace
 
@@ -513,9 +522,11 @@ void ChatWindow::setupUi() {
     settingsBtn_->setCursor(Qt::PointingHandCursor);
     settingsBtn_->setToolButtonStyle(Qt::ToolButtonTextOnly);
 
+    railLayout->addSpacing(4);
     railLayout->addWidget(selfAvatarBtn_, 0, Qt::AlignHCenter | Qt::AlignTop);
     railLayout->addStretch(1);
     railLayout->addWidget(settingsBtn_, 0, Qt::AlignHCenter | Qt::AlignBottom);
+    railLayout->addSpacing(4);
 
     auto* contactsPane = new QFrame(body);
     contactsPane->setObjectName("ContactsPane");
@@ -540,6 +551,7 @@ void ChatWindow::setupUi() {
     contactList_->setSpacing(4);
     contactList_->setUniformItemSizes(false);
     contactList_->setIconSize(QSize(30, 30));
+    contactList_->setFocusPolicy(Qt::NoFocus);
 
     leftLayout->addWidget(contactsTopDrag_);
     leftLayout->addSpacing(4);
@@ -602,7 +614,7 @@ void ChatWindow::setupUi() {
     controlRow->addWidget(closeBtn_);
     titleRight->addLayout(controlRow);
     titleRight->addSpacing(4);
-    titleRight->addWidget(viewProfileBtn_, 0, Qt::AlignRight);
+    titleRight->addWidget(viewProfileBtn_, 0, Qt::AlignHCenter);
 
     titleLayout->addWidget(chatTitleLabel_, 1, Qt::AlignVCenter);
     titleLayout->addLayout(titleRight);
@@ -781,8 +793,10 @@ void ChatWindow::setupUi() {
             border-radius: 8px;
             padding: 10px 8px;
             margin: 1px 2px;
+            outline: none;
         }
         QListWidget::item:hover { background: rgba(0, 0, 0, 0.03); }
+        QListWidget::item:focus { outline: none; }
         QListWidget::item:selected {
             background: rgba(164, 173, 184, 0.14);
             color: #1e2430;
