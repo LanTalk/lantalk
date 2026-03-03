@@ -702,6 +702,8 @@ void ChatWindow::setupUi() {
     inputEdit_->setPlaceholderText("输入消息（Enter发送，Shift+Enter换行）");
     inputEdit_->setMinimumHeight(72);
     inputEdit_->setAcceptRichText(false);
+    inputEdit_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    inputEdit_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     sendBtn_ = new QPushButton("发送", chatContent);
     sendBtn_->setObjectName("PrimaryBtn");
@@ -1648,14 +1650,17 @@ void ChatWindow::renderCurrentConversation() {
 
     conversationLayout_->addStretch(1);
 
-    if (QScrollBar* bar = conversationView_->verticalScrollBar()) {
-        bar->setValue(bar->maximum());
-        QTimer::singleShot(0, this, [this]() {
-            if (QScrollBar* delayedBar = conversationView_->verticalScrollBar()) {
-                delayedBar->setValue(delayedBar->maximum());
-            }
-        });
-    }
+    auto scrollToBottom = [this]() {
+        if (conversationView_ == nullptr) {
+            return;
+        }
+        if (QScrollBar* bar = conversationView_->verticalScrollBar()) {
+            bar->setValue(bar->maximum());
+        }
+    };
+    scrollToBottom();
+    QTimer::singleShot(0, this, scrollToBottom);
+    QTimer::singleShot(30, this, scrollToBottom);
 }
 
 void ChatWindow::updateChatHeader() {
