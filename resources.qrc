@@ -1,4 +1,7 @@
 <RCC>
+  <qresource prefix="/fonts">
+    <file alias="LXGWWenKaiScreen.ttf">fonts/LXGWWenKaiScreen.ttf</file>
+  </qresource>
   <qresource prefix="/avatars">
     <file alias="default_1.png">avatars/default_1.png</file>
     <file alias="default_2.png">avatars/default_2.png</file>

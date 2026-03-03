@@ -105,6 +105,8 @@ private:
     QTimer* refreshTimer_ = nullptr;
 
     QWidget* titleBar_ = nullptr;
+    QWidget* railPane_ = nullptr;
+    QWidget* contactsTopDrag_ = nullptr;
     QLabel* chatTitleLabel_ = nullptr;
     QPushButton* minBtn_ = nullptr;
     QPushButton* maxBtn_ = nullptr;

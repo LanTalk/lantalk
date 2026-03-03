@@ -400,7 +400,36 @@ bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                     *result = HTCLIENT;
                     return true;
                 }
-                *result = HTCAPTION;
+                const int firstRowBottom = titleRect.top() + 34;
+                if (globalPos.y() <= firstRowBottom) {
+                    *result = HTCAPTION;
+                    return true;
+                }
+                *result = HTCLIENT;
+                return true;
+            }
+        }
+
+        if (inWidget(contactsTopDrag_)) {
+            *result = HTCAPTION;
+            return true;
+        }
+
+        if (inWidget(railPane_) && !inWidget(settingsBtn_)) {
+            *result = HTCAPTION;
+            return true;
+        }
+
+        if (inWidget(searchEdit_) || inWidget(contactList_) || inWidget(settingsBtn_) || inWidget(inputEdit_) ||
+            inWidget(conversationView_) || inWidget(sendBtn_) || inWidget(sendFileBtn_) || inWidget(emojiBtn_)) {
+            *result = HTCLIENT;
+            return true;
+        }
+
+        if (centralWidget() != nullptr) {
+            const QRect clientRect(centralWidget()->mapToGlobal(QPoint(0, 0)), centralWidget()->size());
+            if (clientRect.contains(globalPos)) {
+                *result = HTCLIENT;
                 return true;
             }
         }
@@ -444,6 +473,7 @@ void ChatWindow::setupUi() {
 
     auto* rail = new QFrame(body);
     rail->setObjectName("Rail");
+    railPane_ = rail;
     rail->setFixedWidth(82);
     auto* railLayout = new QVBoxLayout(rail);
     railLayout->setContentsMargins(10, 12, 10, 12);
@@ -478,6 +508,11 @@ void ChatWindow::setupUi() {
     leftLayout->setContentsMargins(12, 20, 12, 12);
     leftLayout->setSpacing(8);
 
+    contactsTopDrag_ = new QWidget(contactsPane);
+    contactsTopDrag_->setObjectName("ContactsTopDrag");
+    contactsTopDrag_->setFixedHeight(20);
+    contactsTopDrag_->setCursor(Qt::ArrowCursor);
+
     searchEdit_ = new QLineEdit(contactsPane);
     searchEdit_->setObjectName("SearchBox");
     searchEdit_->setPlaceholderText("搜索联系人");
@@ -489,7 +524,8 @@ void ChatWindow::setupUi() {
     contactList_->setUniformItemSizes(false);
     contactList_->setIconSize(QSize(30, 30));
 
-    leftLayout->addSpacing(4);
+    leftLayout->addWidget(contactsTopDrag_);
+    leftLayout->addSpacing(2);
     leftLayout->addWidget(searchEdit_);
     leftLayout->addWidget(contactList_, 1);
 
@@ -503,7 +539,7 @@ void ChatWindow::setupUi() {
     titleBar_->setObjectName("TitleBar");
     titleBar_->setFixedHeight(72);
     auto* titleLayout = new QHBoxLayout(titleBar_);
-    titleLayout->setContentsMargins(18, 8, 8, 7);
+    titleLayout->setContentsMargins(18, 0, 0, 7);
     titleLayout->setSpacing(10);
 
     chatTitleLabel_ = new QLabel("聊天窗口", titleBar_);
@@ -534,7 +570,9 @@ void ChatWindow::setupUi() {
 
     viewProfileBtn_ = new QPushButton("···", titleBar_);
     viewProfileBtn_->setObjectName("ProfileBtn");
-    QFont profileFont("Microsoft YaHei UI", 13, QFont::DemiBold);
+    QFont profileFont;
+    profileFont.setPointSize(13);
+    profileFont.setWeight(QFont::DemiBold);
     profileFont.setStyleStrategy(QFont::PreferAntialias);
     viewProfileBtn_->setFont(profileFont);
     viewProfileBtn_->setCursor(Qt::PointingHandCursor);
@@ -663,6 +701,9 @@ void ChatWindow::setupUi() {
             border-color: #bcc6d3;
             background: #ffffff;
         }
+        QWidget#ContactsTopDrag {
+            background: transparent;
+        }
         QListWidget {
             border: none;
             background: transparent;
@@ -788,7 +829,6 @@ void ChatWindow::setupUi() {
             color: #374151;
             min-width: 30px;
             min-height: 24px;
-            font-family: "Microsoft YaHei UI";
             font-size: 16px;
             font-weight: 700;
             padding: 0;
