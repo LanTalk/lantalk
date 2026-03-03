@@ -41,6 +41,7 @@
 #include <QSet>
 #include <QSignalBlocker>
 #include <QScreen>
+#include <QShowEvent>
 #include <QSplitter>
 #include <QStringList>
 #include <QTextBrowser>
@@ -51,6 +52,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QCursor>
+#include <QResizeEvent>
 
 #include <algorithm>
 #include <cstdint>
@@ -321,8 +323,19 @@ void ChatWindow::closeEvent(QCloseEvent* event) {
 void ChatWindow::changeEvent(QEvent* event) {
     if (event != nullptr && event->type() == QEvent::WindowStateChange && maxBtn_ != nullptr) {
         maxBtn_->setText(isMaximized() ? QString(QChar(0xE923)) : QString(QChar(0xE922)));
+        refreshWindowBorder();
     }
     QMainWindow::changeEvent(event);
+}
+
+void ChatWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event);
+    refreshWindowBorder();
+}
+
+void ChatWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    refreshWindowBorder();
 }
 
 bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
@@ -695,6 +708,11 @@ void ChatWindow::setupUi() {
     mainLayout->addWidget(body, 1);
 
     setCentralWidget(central);
+    windowBorder_ = new QFrame(this);
+    windowBorder_->setObjectName("WindowBorder");
+    windowBorder_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    windowBorder_->setFocusPolicy(Qt::NoFocus);
+    refreshWindowBorder();
 
     inputEdit_->installEventFilter(this);
 
@@ -714,6 +732,10 @@ void ChatWindow::setupUi() {
         QFrame#TitleBar {
             background: #f8f9fb;
             border-bottom: 1px solid #dde2e9;
+        }
+        QFrame#WindowBorder {
+            border: 1px solid #bec6d2;
+            background: transparent;
         }
         QLabel#ChatTitle {
             color: #14181f;
@@ -889,6 +911,15 @@ void ChatWindow::setupUi() {
             background: transparent;
         }
     )");
+}
+
+void ChatWindow::refreshWindowBorder() {
+    if (windowBorder_ == nullptr) {
+        return;
+    }
+    windowBorder_->setGeometry(rect());
+    windowBorder_->setVisible(!isMaximized());
+    windowBorder_->raise();
 }
 
 void ChatWindow::bindEvents() {

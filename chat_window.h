@@ -17,6 +17,8 @@ class QCloseEvent;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QResizeEvent;
+class QShowEvent;
 class QToolButton;
 class QTextBrowser;
 class QTextEdit;
@@ -31,6 +33,8 @@ public:
 protected:
     void closeEvent(QCloseEvent* event) override;
     void changeEvent(QEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
     bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
@@ -96,6 +100,7 @@ private:
     void applySelfAvatar();
     QString localIpSummary() const;
     QString displayName(const Contact& contact) const;
+    void refreshWindowBorder();
 
     uint64_t storageSeed() const;
     QByteArray encryptBlob(const QByteArray& plain) const;
@@ -105,6 +110,7 @@ private:
     QTimer* refreshTimer_ = nullptr;
 
     QWidget* titleBar_ = nullptr;
+    QWidget* windowBorder_ = nullptr;
     QWidget* railPane_ = nullptr;
     QWidget* contactsTopDrag_ = nullptr;
     QLabel* chatTitleLabel_ = nullptr;
