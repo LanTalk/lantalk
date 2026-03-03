@@ -227,10 +227,15 @@ uint64_t bytesToNonce(const QByteArray& in, int offset) {
 }
 
 QStringList builtInAvatarPaths() {
+    QDir dir(":/avatars");
+    QStringList filters;
+    filters << "default_*.png";
+    const QStringList names = dir.entryList(filters, QDir::Files, QDir::Name);
+
     QStringList out;
-    out.reserve(12);
-    for (int i = 1; i <= 12; ++i) {
-        out.push_back(QString(":/avatars/default_%1.png").arg(i));
+    out.reserve(names.size());
+    for (const QString& name : names) {
+        out.push_back(QString(":/avatars/%1").arg(name));
     }
     return out;
 }
