@@ -1585,15 +1585,9 @@ void ChatWindow::renderCurrentConversation() {
 
         const QString senderTime = QString("%1  %2").arg(htmlEscape(sender), timeText(message.timestampMs));
         const QString bubble = QString(
-                                   "<table cellspacing='0' cellpadding='0'>"
-                                   "<tr>"
-                                   "<td style='background:%2;border:1px solid %3;border-radius:12px;padding:8px 10px;"
-                                   "color:#0f172a;line-height:1.58;text-align:left;'>"
-                                   "<div style='max-width:%1px;white-space:pre-wrap;word-wrap:break-word;"
-                                   "word-break:break-all;text-align:left;'>%4</div>"
-                                   "</td>"
-                                   "</tr>"
-                                   "</table>")
+                                   "<span style='display:inline-block;max-width:%1px;background:%2;border:1px solid %3;"
+                                   "border-radius:12px;padding:8px 10px;color:#0f172a;line-height:1.58;"
+                                   "white-space:pre-wrap;word-wrap:break-word;word-break:break-all;text-align:left;'>%4</span>")
                                    .arg(bubbleMaxWidth)
                                    .arg(bubbleBg, bubbleBorder, content);
 
@@ -1605,13 +1599,14 @@ void ChatWindow::renderCurrentConversation() {
                         "</tr>"
                         "<tr>"
                         "<td align='left'>"
-                        "<table cellspacing='0' cellpadding='0'>"
+                        "<table width='100%%' cellspacing='0' cellpadding='0'>"
                         "<tr>"
                         "<td width='34' valign='top' style='vertical-align:top;'>"
                         "<img src='%2' width='34' height='34' style='border-radius:8px;display:block;'/>"
                         "</td>"
                         "<td width='8'></td>"
                         "<td valign='top' style='vertical-align:top;'>%3</td>"
+                        "<td width='100%%'></td>"
                         "</tr>"
                         "</table>"
                         "</td>"
@@ -1628,8 +1623,9 @@ void ChatWindow::renderCurrentConversation() {
                         "</tr>"
                         "<tr>"
                         "<td align='right'>"
-                        "<table cellspacing='0' cellpadding='0'>"
+                        "<table width='100%%' cellspacing='0' cellpadding='0'>"
                         "<tr>"
+                        "<td width='100%%'></td>"
                         "<td valign='top' style='vertical-align:top;'>%2</td>"
                         "<td width='8'></td>"
                         "<td width='34' valign='top' style='vertical-align:top;'>"
