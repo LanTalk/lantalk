@@ -1513,7 +1513,7 @@ void ChatWindow::renderCurrentConversation() {
     const int viewWidth = (conversationView_ != nullptr && conversationView_->viewport() != nullptr)
                               ? conversationView_->viewport()->width()
                               : width();
-    const int bubbleMaxWidth = std::max(180, ((std::max(420, viewWidth) - 98) * 2) / 3);
+    const int bubbleMaxWidth = std::max(180, ((std::max(420, viewWidth) - 112) * 2) / 3);
 
     QString html;
     html += QString(
@@ -1531,21 +1531,22 @@ void ChatWindow::renderCurrentConversation() {
             if (fileLabel.isEmpty()) {
                 fileLabel = QFileInfo(message.filePath).fileName();
             }
-            fileLabel = injectSoftWrapHints(fileLabel, 18);
+            fileLabel = injectSoftWrapHints(fileLabel, 16);
             const QString link = QUrl::fromLocalFile(message.filePath).toString();
             QString labelHtml = htmlEscape(fileLabel);
             labelHtml.replace(QString(QChar(0x200B)), "&#8203;");
             content = QString("<a style='color:#1d4ed8;text-decoration:none;word-break:break-all;' href='%1'>文件：%2</a>")
                           .arg(link, labelHtml);
         } else {
-            QString wrappedText = injectSoftWrapHints(message.text, 18);
+            QString wrappedText = injectSoftWrapHints(message.text, 16);
             content = htmlEscape(wrappedText);
             content.replace(QString(QChar(0x200B)), "&#8203;");
             content.replace("\n", "<br/>");
         }
 
+        const QString senderTime = QString("%1  %2").arg(htmlEscape(sender), timeText(message.timestampMs));
         const QString bubble = QString(
-                                   "<div style='display:inline-block;max-width:%1px;min-width:0;background:%2;border:1px solid %3;"
+                                   "<div style='display:inline-block;max-width:%1px;background:%2;border:1px solid %3;"
                                    "border-radius:12px;padding:8px 10px;color:#0f172a;line-height:1.58;"
                                    "white-space:pre-wrap;word-wrap:break-word;word-break:break-all;text-align:left;'>%4</div>")
                                    .arg(bubbleMaxWidth)
@@ -1560,7 +1561,7 @@ void ChatWindow::renderCurrentConversation() {
                         "<div style='display:inline-block;vertical-align:top;margin-left:8px;'>%3</div>"
                         "</div>"
                         "</div>")
-                        .arg(htmlEscape(sender) + "  " + timeText(message.timestampMs))
+                        .arg(senderTime)
                         .arg(avatarUrl)
                         .arg(bubble);
         } else {
@@ -1572,7 +1573,7 @@ void ChatWindow::renderCurrentConversation() {
                         "<img src='%3' width='34' height='34' style='border-radius:8px;vertical-align:top;'/>"
                         "</div>"
                         "</div>")
-                        .arg(htmlEscape(sender) + "  " + timeText(message.timestampMs))
+                        .arg(senderTime)
                         .arg(bubble)
                         .arg(avatarUrl);
         }
