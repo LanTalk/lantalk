@@ -307,7 +307,6 @@ ChatWindow::~ChatWindow() {
 void ChatWindow::closeEvent(QCloseEvent* event) {
     app_.setMessageCallback(nullptr);
     app_.setEventCallback(nullptr);
-    app_.shutdown();
     event->accept();
 }
 
@@ -333,45 +332,6 @@ bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
         ::GetWindowRect(reinterpret_cast<HWND>(winId()), &winRect);
         const int border = 8;
 
-        if (!isMaximized()) {
-            const bool left = cursor.x >= winRect.left && cursor.x < winRect.left + border;
-            const bool right = cursor.x <= winRect.right && cursor.x > winRect.right - border;
-            const bool top = cursor.y >= winRect.top && cursor.y < winRect.top + border;
-            const bool bottom = cursor.y <= winRect.bottom && cursor.y > winRect.bottom - border;
-            if (left && top) {
-                *result = HTTOPLEFT;
-                return true;
-            }
-            if (right && top) {
-                *result = HTTOPRIGHT;
-                return true;
-            }
-            if (left && bottom) {
-                *result = HTBOTTOMLEFT;
-                return true;
-            }
-            if (right && bottom) {
-                *result = HTBOTTOMRIGHT;
-                return true;
-            }
-            if (left) {
-                *result = HTLEFT;
-                return true;
-            }
-            if (right) {
-                *result = HTRIGHT;
-                return true;
-            }
-            if (top) {
-                *result = HTTOP;
-                return true;
-            }
-            if (bottom) {
-                *result = HTBOTTOM;
-                return true;
-            }
-        }
-
         auto inWidget = [&](const QWidget* w) -> bool {
             if (w == nullptr || !w->isVisible()) {
                 return false;
@@ -391,6 +351,32 @@ bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
         if (inWidget(minBtn_)) {
             *result = HTMINBUTTON;
             return true;
+        }
+
+        if (!isMaximized()) {
+            const bool left = cursor.x >= winRect.left && cursor.x < winRect.left + border;
+            const bool right = cursor.x <= winRect.right && cursor.x > winRect.right - border;
+            const bool bottom = cursor.y <= winRect.bottom && cursor.y > winRect.bottom - border;
+            if (left && bottom) {
+                *result = HTBOTTOMLEFT;
+                return true;
+            }
+            if (right && bottom) {
+                *result = HTBOTTOMRIGHT;
+                return true;
+            }
+            if (left) {
+                *result = HTLEFT;
+                return true;
+            }
+            if (right) {
+                *result = HTRIGHT;
+                return true;
+            }
+            if (bottom) {
+                *result = HTBOTTOM;
+                return true;
+            }
         }
 
         if (titleBar_ != nullptr) {
@@ -413,6 +399,15 @@ bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
         if (inWidget(contactsTopDrag_)) {
             *result = HTCAPTION;
             return true;
+        }
+
+        if (searchEdit_ != nullptr && searchEdit_->parentWidget() != nullptr) {
+            QWidget* pane = searchEdit_->parentWidget();
+            const QRect paneRect(pane->mapToGlobal(QPoint(0, 0)), pane->size());
+            if (paneRect.contains(globalPos) && globalPos.y() <= paneRect.top() + 34) {
+                *result = HTCAPTION;
+                return true;
+            }
         }
 
         if (inWidget(railPane_) && !inWidget(settingsBtn_)) {
@@ -505,12 +500,12 @@ void ChatWindow::setupUi() {
     contactsPane->setObjectName("ContactsPane");
     contactsPane->setFixedWidth(286);
     auto* leftLayout = new QVBoxLayout(contactsPane);
-    leftLayout->setContentsMargins(12, 20, 12, 12);
+    leftLayout->setContentsMargins(12, 0, 12, 12);
     leftLayout->setSpacing(8);
 
     contactsTopDrag_ = new QWidget(contactsPane);
     contactsTopDrag_->setObjectName("ContactsTopDrag");
-    contactsTopDrag_->setFixedHeight(20);
+    contactsTopDrag_->setFixedHeight(30);
     contactsTopDrag_->setCursor(Qt::ArrowCursor);
 
     searchEdit_ = new QLineEdit(contactsPane);
@@ -525,7 +520,7 @@ void ChatWindow::setupUi() {
     contactList_->setIconSize(QSize(30, 30));
 
     leftLayout->addWidget(contactsTopDrag_);
-    leftLayout->addSpacing(2);
+    leftLayout->addSpacing(4);
     leftLayout->addWidget(searchEdit_);
     leftLayout->addWidget(contactList_, 1);
 
@@ -1046,7 +1041,24 @@ void ChatWindow::openSettingsDialog() {
 
     QDialog dialog(this);
     dialog.setWindowTitle("个人设置");
-    dialog.resize(430, 360);
+    dialog.resize(470, 390);
+    QFont dialogFont = font();
+    dialogFont.setPointSize(10);
+    dialogFont.setHintingPreference(QFont::PreferFullHinting);
+    dialog.setFont(dialogFont);
+    dialog.setStyleSheet(R"(
+        QLabel { font-size: 13px; }
+        QLineEdit {
+            min-height: 30px;
+            font-size: 13px;
+            padding: 0 8px;
+        }
+        QPushButton {
+            min-height: 32px;
+            font-size: 13px;
+            padding: 0 12px;
+        }
+    )");
 
     auto* root = new QVBoxLayout(&dialog);
     root->setContentsMargins(14, 14, 14, 14);
@@ -1141,7 +1153,24 @@ void ChatWindow::openContactProfileDialog() {
 
     QDialog dialog(this);
     dialog.setWindowTitle("查看资料");
-    dialog.resize(420, 340);
+    dialog.resize(450, 372);
+    QFont dialogFont = font();
+    dialogFont.setPointSize(10);
+    dialogFont.setHintingPreference(QFont::PreferFullHinting);
+    dialog.setFont(dialogFont);
+    dialog.setStyleSheet(R"(
+        QLabel { font-size: 13px; }
+        QLineEdit {
+            min-height: 30px;
+            font-size: 13px;
+            padding: 0 8px;
+        }
+        QPushButton {
+            min-height: 32px;
+            font-size: 13px;
+            padding: 0 12px;
+        }
+    )");
 
     auto* root = new QVBoxLayout(&dialog);
     root->setContentsMargins(14, 14, 14, 14);

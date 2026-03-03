@@ -1180,11 +1180,12 @@ private:
         while (running_.load()) {
             broadcastHello();
             prunePeers();
-            for (int i = 0; i < kHeartbeatSeconds; ++i) {
+            const int sliceCount = kHeartbeatSeconds * 10;
+            for (int i = 0; i < sliceCount; ++i) {
                 if (!running_.load()) {
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
     }

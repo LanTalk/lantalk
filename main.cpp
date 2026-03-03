@@ -2,11 +2,13 @@
 
 #include <QApplication>
 #include <QFontDatabase>
+#include <QGuiApplication>
 #include <QMessageBox>
 
 #include <exception>
 
 int main(int argc, char* argv[]) {
+    QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::RoundPreferFloor);
     QApplication app(argc, argv);
     app.setApplicationName("LanTalk");
     const int fontId = QFontDatabase::addApplicationFont(":/fonts/LXGWWenKaiScreen.ttf");
@@ -14,7 +16,9 @@ int main(int argc, char* argv[]) {
         const QStringList families = QFontDatabase::applicationFontFamilies(fontId);
         if (!families.isEmpty()) {
             QFont font(families.constFirst());
-            font.setStyleStrategy(QFont::PreferAntialias);
+            font.setPointSize(10);
+            font.setStyleStrategy(QFont::PreferQuality);
+            font.setHintingPreference(QFont::PreferFullHinting);
             app.setFont(font);
         }
     }
