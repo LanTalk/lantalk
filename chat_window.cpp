@@ -93,7 +93,7 @@ QString safeFileToken(const QString& source) {
 template <typename ContactLike>
 qint64 lastMessageTs(const ContactLike& contact) {
     if (contact.messages.empty()) {
-        return contact.lastSeenMs;
+        return 0;
     }
     return contact.messages.back().timestampMs;
 }
@@ -1399,6 +1399,18 @@ void ChatWindow::refreshOnlinePeers() {
         contact.lastSeenMs = now;
     }
 
+    // Keep only offline contacts that have at least one chat message.
+    const size_t beforeCount = contacts_.size();
+    contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
+                                   [](const Contact& contact) { return !contact.online && contact.messages.empty(); }),
+                    contacts_.end());
+    if (contacts_.size() != beforeCount) {
+        if (!activeContactId_.isEmpty() && findContact(activeContactId_) == nullptr) {
+            activeContactId_.clear();
+        }
+        changed = true;
+    }
+
     if (changed) {
         saveContacts();
         rebuildContactList();
@@ -1409,13 +1421,24 @@ void ChatWindow::refreshOnlinePeers() {
 
 void ChatWindow::rebuildContactList() {
     std::sort(contacts_.begin(), contacts_.end(), [](const Contact& a, const Contact& b) {
+        const bool aHasChat = !a.messages.empty();
+        const bool bHasChat = !b.messages.empty();
+        if (aHasChat != bHasChat) {
+            return aHasChat > bHasChat;
+        }
+
+        if (aHasChat) {
+            const qint64 aTs = lastMessageTs(a);
+            const qint64 bTs = lastMessageTs(b);
+            if (aTs != bTs) {
+                return aTs > bTs;
+            }
+        } else if (a.lastSeenMs != b.lastSeenMs) {
+            return a.lastSeenMs > b.lastSeenMs;
+        }
+
         if (a.online != b.online) {
             return a.online > b.online;
-        }
-        const qint64 aTs = lastMessageTs(a);
-        const qint64 bTs = lastMessageTs(b);
-        if (aTs != bTs) {
-            return aTs > bTs;
         }
         return a.name < b.name;
     });
@@ -1548,12 +1571,13 @@ void ChatWindow::handleMessageEvent(const MessageEvent& event) {
     if (!peerIp.isEmpty()) {
         contact.ip = peerIp;
     }
+    const qint64 now = nowMs();
     contact.online = true;
-    contact.lastSeenMs = nowMs();
+    contact.lastSeenMs = now;
 
     ChatMessage message;
-    const qint64 fallbackTs = nowMs();
-    message.timestampMs = (event.timestamp > 0) ? static_cast<qint64>(event.timestamp) * 1000 : fallbackTs;
+    const qint64 eventTs = (event.timestamp > 0) ? static_cast<qint64>(event.timestamp) * 1000 : 0;
+    message.timestampMs = std::max(now, eventTs);
     message.incoming = event.incoming;
     message.isFile = event.isFile;
     message.text = QString::fromStdString(event.text);
@@ -1715,6 +1739,10 @@ void ChatWindow::loadContacts() {
         loadHistory(contact);
         contacts_.push_back(std::move(contact));
     }
+
+    contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
+                                   [](const Contact& contact) { return !contact.online && contact.messages.empty(); }),
+                    contacts_.end());
 
     rebuildContactList();
     renderCurrentConversation();
