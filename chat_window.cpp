@@ -14,6 +14,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
+#include <QFontMetrics>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHostAddress>
@@ -1484,6 +1485,21 @@ void ChatWindow::renderCurrentConversation() {
     const QImage selfImage = decodeAvatarPayload(QString::fromStdString(selfConfig.avatarPayload));
     const QString outgoingAvatar =
         avatarDataUrl(selfImage, 34, QStringLiteral("self_") + QString::fromStdString(selfConfig.userId));
+    const int viewWidth = (conversationView_ != nullptr && conversationView_->viewport() != nullptr)
+                              ? conversationView_->viewport()->width()
+                              : width();
+    const int bubbleMaxWidth = std::max(220, ((std::max(480, viewWidth) - 110) * 2) / 3);
+    const QFontMetrics bubbleMetrics(conversationView_->font());
+
+    auto calcBubbleWidth = [&](const QString& plainText) -> int {
+        const QStringList lines = plainText.split('\n');
+        int maxLineWidth = 0;
+        for (const QString& line : lines) {
+            maxLineWidth = std::max(maxLineWidth, bubbleMetrics.horizontalAdvance(line));
+        }
+        const int padded = maxLineWidth + 24;
+        return std::clamp(padded, 42, bubbleMaxWidth);
+    };
 
     QString html;
     html += QString(
@@ -1496,23 +1512,35 @@ void ChatWindow::renderCurrentConversation() {
         const QString avatarUrl = message.incoming ? incomingAvatar : outgoingAvatar;
 
         QString content;
+        QString measureText;
         if (message.isFile) {
             QString fileLabel = message.fileName;
             if (fileLabel.isEmpty()) {
                 fileLabel = QFileInfo(message.filePath).fileName();
             }
+            measureText = QString("文件：%1").arg(fileLabel);
             const QString link = QUrl::fromLocalFile(message.filePath).toString();
             content = QString("<a style='color:#1d4ed8;text-decoration:none;' href='%1'>文件：%2</a>")
                           .arg(link, htmlEscape(fileLabel));
         } else {
+            measureText = message.text;
             content = htmlEscape(message.text).replace("\n", "<br/>");
         }
+        if (measureText.isEmpty()) {
+            measureText = " ";
+        }
+        const int bubbleWidth = calcBubbleWidth(measureText);
 
-        const QString headerLine = QString("<div style='font-size:11px;color:#8b95a7;margin-bottom:4px;'>%1  %2</div>")
-                                       .arg(htmlEscape(sender), timeText(message.timestampMs));
+        const QString headerColor = "#8b95a7";
+        const QString headerLineLeft = QString("<div style='font-size:11px;color:%1;margin-bottom:4px;text-align:left;'>%2  %3</div>")
+                                           .arg(headerColor, htmlEscape(sender), timeText(message.timestampMs));
+        const QString headerLineRight = QString("<div style='font-size:11px;color:%1;margin-bottom:4px;text-align:right;'>%2  %3</div>")
+                                            .arg(headerColor, htmlEscape(sender), timeText(message.timestampMs));
         const QString bubble = QString(
-                                   "<div style='display:inline-block;max-width:520px;background:%1;border:1px solid %2;"
-                                   "border-radius:12px;padding:8px 10px;color:#0f172a;line-height:1.58;'>%3</div>")
+                                   "<div style='display:inline-block;width:%1px;background:%2;border:1px solid %3;"
+                                   "border-radius:12px;padding:8px 10px;color:#0f172a;line-height:1.58;"
+                                   "white-space:normal;word-break:break-all;text-align:left;'>%4</div>")
+                                   .arg(bubbleWidth)
                                    .arg(bubbleBg, bubbleBorder, content);
 
         if (message.incoming) {
@@ -1522,23 +1550,23 @@ void ChatWindow::renderCurrentConversation() {
                         "<td width='40' valign='top' style='padding-top:2px;'>"
                         "<img src='%1' width='34' height='34' style='border-radius:8px;'/>"
                         "</td>"
-                        "<td align='left' valign='top'>%2%3</td>"
-                        "<td width='28'></td>"
+                        "<td align='left' valign='top'><div style='text-align:left;'>%2%3</div></td>"
+                        "<td width='16'></td>"
                         "</tr>"
                         "</table>")
-                        .arg(avatarUrl, headerLine, bubble);
+                        .arg(avatarUrl, headerLineLeft, bubble);
         } else {
             html += QString(
                         "<table width='100%%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
                         "<tr>"
-                        "<td width='28'></td>"
-                        "<td align='right' valign='top'>%1%2</td>"
+                        "<td width='16'></td>"
+                        "<td align='right' valign='top'><div style='text-align:right;'>%1%2</div></td>"
                         "<td width='40' valign='top' style='padding-top:2px;' align='right'>"
                         "<img src='%3' width='34' height='34' style='border-radius:8px;'/>"
                         "</td>"
                         "</tr>"
                         "</table>")
-                        .arg(headerLine, bubble, avatarUrl);
+                        .arg(headerLineRight, bubble, avatarUrl);
         }
     }
     html += "</body></html>";
