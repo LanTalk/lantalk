@@ -172,4 +172,5 @@ private:
     QHash<QString, QString> signalServerByUserId_;
     QSet<QString> signalP2PUsers_;
     QSet<QString> signalWsUsers_;
+    QSet<QString> seenSignalMsgIds_;
 };

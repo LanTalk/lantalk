@@ -142,7 +142,7 @@ QPixmap makeDefaultAvatar(const QString& seed, int size) {
     QPixmap pix(size, size);
     pix.fill(Qt::transparent);
 
-    const uint32_t hash = qHash(seed.isEmpty() ? QStringLiteral("L") : seed);
+    const uint32_t hash = static_cast<uint32_t>(qHash(seed.isEmpty() ? QStringLiteral("L") : seed));
     const int hue = static_cast<int>(hash % 360U);
     const QColor top = QColor::fromHsl(hue, 170, 145);
     const QColor bottom = QColor::fromHsl((hue + 26) % 360, 150, 120);
