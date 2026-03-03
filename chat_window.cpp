@@ -1,6 +1,7 @@
 #include "chat_window.h"
 
 #include <QAbstractSocket>
+#include <QApplication>
 #include <QBuffer>
 #include <QCloseEvent>
 #include <QDateTime>
@@ -40,6 +41,7 @@
 #include <QSet>
 #include <QSignalBlocker>
 #include <QScreen>
+#include <QSplitter>
 #include <QStringList>
 #include <QTextBrowser>
 #include <QTextEdit>
@@ -48,6 +50,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QCursor>
 
 #include <algorithm>
 #include <cstdint>
@@ -322,14 +325,8 @@ bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
     Q_UNUSED(eventType);
     MSG* msg = static_cast<MSG*>(message);
     if (msg != nullptr && msg->message == WM_NCHITTEST) {
-        const POINT cursor{
-            static_cast<short>(LOWORD(msg->lParam)),
-            static_cast<short>(HIWORD(msg->lParam)),
-        };
-        const QPoint globalPos(cursor.x, cursor.y);
-
-        RECT winRect{};
-        ::GetWindowRect(reinterpret_cast<HWND>(winId()), &winRect);
+        const QPoint globalPos = QCursor::pos();
+        const QRect winRect = frameGeometry();
         const int border = 8;
 
         auto inWidget = [&](const QWidget* w) -> bool {
@@ -354,9 +351,9 @@ bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
         }
 
         if (!isMaximized()) {
-            const bool left = cursor.x >= winRect.left && cursor.x < winRect.left + border;
-            const bool right = cursor.x <= winRect.right && cursor.x > winRect.right - border;
-            const bool bottom = cursor.y <= winRect.bottom && cursor.y > winRect.bottom - border;
+            const bool left = globalPos.x() >= winRect.left() && globalPos.x() < winRect.left() + border;
+            const bool right = globalPos.x() <= winRect.right() && globalPos.x() > winRect.right() - border;
+            const bool bottom = globalPos.y() <= winRect.bottom() && globalPos.y() > winRect.bottom() - border;
             if (left && bottom) {
                 *result = HTBOTTOMLEFT;
                 return true;
@@ -498,7 +495,8 @@ void ChatWindow::setupUi() {
 
     auto* contactsPane = new QFrame(body);
     contactsPane->setObjectName("ContactsPane");
-    contactsPane->setFixedWidth(286);
+    contactsPane->setMinimumWidth(210);
+    contactsPane->setMaximumWidth(520);
     auto* leftLayout = new QVBoxLayout(contactsPane);
     leftLayout->setContentsMargins(12, 0, 12, 12);
     leftLayout->setSpacing(8);
@@ -589,10 +587,10 @@ void ChatWindow::setupUi() {
     rightLayout->setContentsMargins(14, 12, 14, 12);
     rightLayout->setSpacing(8);
 
-    conversationView_ = new QTextBrowser(chatPane);
+    conversationView_ = new QTextBrowser(chatContent);
     conversationView_->setOpenExternalLinks(true);
 
-    auto* composeArea = new QWidget(chatPane);
+    auto* composeArea = new QWidget(chatContent);
     composeArea->setObjectName("ComposeArea");
     auto* composeLayout = new QVBoxLayout(composeArea);
     composeLayout->setContentsMargins(0, 0, 0, 0);
@@ -629,12 +627,12 @@ void ChatWindow::setupUi() {
     inputRow->setContentsMargins(0, 0, 0, 0);
     inputRow->setSpacing(8);
 
-    inputEdit_ = new QTextEdit(chatPane);
+    inputEdit_ = new QTextEdit(chatContent);
     inputEdit_->setPlaceholderText("输入消息（Enter发送，Shift+Enter换行）");
     inputEdit_->setFixedHeight(96);
     inputEdit_->setAcceptRichText(false);
 
-    sendBtn_ = new QPushButton("发送", chatPane);
+    sendBtn_ = new QPushButton("发送", chatContent);
     sendBtn_->setObjectName("PrimaryBtn");
     sendBtn_->setFixedWidth(82);
     sendBtn_->setFixedHeight(34);
@@ -645,15 +643,40 @@ void ChatWindow::setupUi() {
     composeLayout->addLayout(toolsRow);
     composeLayout->addLayout(inputRow);
 
-    rightLayout->addWidget(conversationView_, 1);
-    rightLayout->addWidget(composeArea);
+    auto* chatSplitter = new QSplitter(Qt::Vertical, chatContent);
+    chatSplitter->setObjectName("ChatSplitter");
+    chatSplitter->setChildrenCollapsible(false);
+    chatSplitter->setHandleWidth(4);
+    chatSplitter->addWidget(conversationView_);
+    chatSplitter->addWidget(composeArea);
+    chatSplitter->setStretchFactor(0, 1);
+    chatSplitter->setStretchFactor(1, 0);
+    chatSplitter->setSizes(QList<int>{540, 200});
+
+    rightLayout->addWidget(chatSplitter, 1);
 
     chatRoot->addWidget(titleBar_);
     chatRoot->addWidget(chatContent, 1);
 
-    bodyLayout->addWidget(rail);
-    bodyLayout->addWidget(contactsPane);
-    bodyLayout->addWidget(chatPane, 1);
+    auto* leftComposite = new QWidget(body);
+    auto* leftCompositeLayout = new QHBoxLayout(leftComposite);
+    leftCompositeLayout->setContentsMargins(0, 0, 0, 0);
+    leftCompositeLayout->setSpacing(0);
+    leftCompositeLayout->addWidget(rail);
+    leftCompositeLayout->addWidget(contactsPane, 1);
+    leftComposite->setMinimumWidth(rail->width() + contactsPane->minimumWidth());
+
+    auto* mainSplitter = new QSplitter(Qt::Horizontal, body);
+    mainSplitter->setObjectName("MainSplitter");
+    mainSplitter->setChildrenCollapsible(false);
+    mainSplitter->setHandleWidth(4);
+    mainSplitter->addWidget(leftComposite);
+    mainSplitter->addWidget(chatPane);
+    mainSplitter->setStretchFactor(0, 0);
+    mainSplitter->setStretchFactor(1, 1);
+    mainSplitter->setSizes(QList<int>{368, 952});
+
+    bodyLayout->addWidget(mainSplitter, 1);
 
     mainLayout->addWidget(body, 1);
 
@@ -699,6 +722,18 @@ void ChatWindow::setupUi() {
         QWidget#ContactsTopDrag {
             background: transparent;
         }
+        QSplitter#MainSplitter::handle {
+            background: #d7dce4;
+        }
+        QSplitter#MainSplitter::handle:hover {
+            background: #c3cad5;
+        }
+        QSplitter#ChatSplitter::handle {
+            background: #dfe4eb;
+        }
+        QSplitter#ChatSplitter::handle:hover {
+            background: #cfd7e2;
+        }
         QListWidget {
             border: none;
             background: transparent;
@@ -713,9 +748,8 @@ void ChatWindow::setupUi() {
         }
         QListWidget::item:hover { background: rgba(0, 0, 0, 0.03); }
         QListWidget::item:selected {
-            background: rgba(164, 173, 184, 0.23);
-            border: 1px solid rgba(154, 163, 175, 0.30);
-            color: #121820;
+            background: rgba(164, 173, 184, 0.14);
+            color: #1e2430;
         }
         QTextBrowser {
             border: none;
@@ -1368,18 +1402,22 @@ void ChatWindow::rebuildContactList() {
 
 void ChatWindow::renderCurrentConversation() {
     const Contact* contact = findContact(activeContactId_);
+    const QString appFontFamily = QApplication::font().family();
     if (contact == nullptr) {
         conversationView_->setHtml(
-            "<div style='color:#6b7280;font-size:14px;padding:18px;'>"
-            "请选择左侧联系人开始聊天。"
-            "</div>");
+            QString("<div style='color:#6b7280;font-size:16px;line-height:1.8;padding:26px 20px;"
+                    "font-family:\"%1\";'>"
+                    "请选择联系人开始聊天。"
+                    "</div>")
+                .arg(htmlEscape(appFontFamily)));
         return;
     }
 
     const QString peerTitle = displayName(*contact);
 
     QString html;
-    html += "<html><body style='font-family:Microsoft YaHei UI;font-size:13px;background:transparent;padding:4px 2px;'>";
+    html += QString("<html><body style='font-family:\"%1\";font-size:13px;background:transparent;padding:4px 2px;'>")
+                .arg(htmlEscape(appFontFamily));
     for (const ChatMessage& message : contact->messages) {
         const QString sender = message.incoming ? peerTitle : QStringLiteral("我");
         const QString align = message.incoming ? "left" : "right";
