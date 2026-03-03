@@ -334,6 +334,7 @@ void ChatWindow::changeEvent(QEvent* event) {
 void ChatWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
     refreshWindowBorder();
+    renderCurrentConversation();
 }
 
 void ChatWindow::showEvent(QShowEvent* event) {
@@ -692,6 +693,7 @@ void ChatWindow::setupUi() {
     chatSplitter->setStretchFactor(0, 1);
     chatSplitter->setStretchFactor(1, 0);
     chatSplitter->setSizes(QList<int>{570, 170});
+    connect(chatSplitter, &QSplitter::splitterMoved, this, [this](int, int) { renderCurrentConversation(); });
 
     rightLayout->addWidget(chatSplitter, 1);
 
@@ -716,6 +718,7 @@ void ChatWindow::setupUi() {
     mainSplitter->setStretchFactor(0, 0);
     mainSplitter->setStretchFactor(1, 1);
     mainSplitter->setSizes(QList<int>{368, 952});
+    connect(mainSplitter, &QSplitter::splitterMoved, this, [this](int, int) { renderCurrentConversation(); });
 
     bodyLayout->addWidget(mainSplitter, 1);
 
@@ -1541,13 +1544,8 @@ void ChatWindow::renderCurrentConversation() {
             content.replace("\n", "<br/>");
         }
 
-        const QString headerColor = "#8b95a7";
-        const QString headerLineLeft = QString("<div style='font-size:11px;color:%1;margin-bottom:4px;text-align:left;'>%2  %3</div>")
-                                           .arg(headerColor, htmlEscape(sender), timeText(message.timestampMs));
-        const QString headerLineRight = QString("<div style='font-size:11px;color:%1;margin-bottom:4px;text-align:right;'>%2  %3</div>")
-                                            .arg(headerColor, htmlEscape(sender), timeText(message.timestampMs));
         const QString bubble = QString(
-                                   "<div style='display:inline-block;max-width:%1px;background:%2;border:1px solid %3;"
+                                   "<div style='display:inline-block;max-width:%1px;min-width:0;background:%2;border:1px solid %3;"
                                    "border-radius:12px;padding:8px 10px;color:#0f172a;line-height:1.58;"
                                    "white-space:pre-wrap;word-wrap:break-word;word-break:break-all;text-align:left;'>%4</div>")
                                    .arg(bubbleMaxWidth)
@@ -1555,30 +1553,26 @@ void ChatWindow::renderCurrentConversation() {
 
         if (message.incoming) {
             html += QString(
-                        "<table width='100%%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
-                        "<tr>"
-                        "<td width='40' valign='top' style='padding-top:2px;'>"
-                        "<img src='%1' width='34' height='34' style='border-radius:8px;'/>"
-                        "</td>"
-                        "<td align='left' valign='top'><div style='text-align:left;'>%2%3</div></td>"
-                        "<td width='100%%'></td>"
-                        "</tr>"
-                        "</table>")
+                        "<div style='width:100%%;margin:8px 0;'>"
+                        "<div style='margin-left:44px;font-size:11px;color:#8b95a7;text-align:left;'>%1</div>"
+                        "<div style='margin-top:2px;text-align:left;'>"
+                        "<img src='%2' width='34' height='34' style='border-radius:8px;vertical-align:top;'/>"
+                        "<div style='display:inline-block;vertical-align:top;margin-left:8px;'>%3</div>"
+                        "</div>"
+                        "</div>")
+                        .arg(htmlEscape(sender) + "  " + timeText(message.timestampMs))
                         .arg(avatarUrl)
-                        .arg(headerLineLeft)
                         .arg(bubble);
         } else {
             html += QString(
-                        "<table width='100%%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
-                        "<tr>"
-                        "<td width='100%%'></td>"
-                        "<td align='right' valign='top'><div style='text-align:right;'>%1%2</div></td>"
-                        "<td width='40' valign='top' style='padding-top:2px;' align='right'>"
-                        "<img src='%3' width='34' height='34' style='border-radius:8px;'/>"
-                        "</td>"
-                        "</tr>"
-                        "</table>")
-                        .arg(headerLineRight)
+                        "<div style='width:100%%;margin:8px 0;'>"
+                        "<div style='margin-right:44px;font-size:11px;color:#8b95a7;text-align:right;'>%1</div>"
+                        "<div style='margin-top:2px;text-align:right;'>"
+                        "<div style='display:inline-block;vertical-align:top;margin-right:8px;'>%2</div>"
+                        "<img src='%3' width='34' height='34' style='border-radius:8px;vertical-align:top;'/>"
+                        "</div>"
+                        "</div>")
+                        .arg(htmlEscape(sender) + "  " + timeText(message.timestampMs))
                         .arg(bubble)
                         .arg(avatarUrl);
         }
