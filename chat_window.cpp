@@ -166,47 +166,11 @@ QPixmap makeRoundAvatar(const QImage& image, int size, const QString& fallbackSe
 }
 
 QIcon makeAppIcon() {
-    QPixmap pix(128, 128);
-    pix.fill(Qt::transparent);
-
-    QPainter painter(&pix);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-
-    QLinearGradient background(8, 8, 120, 120);
-    background.setColorAt(0.0, QColor(20, 90, 240));
-    background.setColorAt(0.52, QColor(44, 124, 255));
-    background.setColorAt(1.0, QColor(24, 182, 216));
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(background);
-    painter.drawRoundedRect(4, 4, 120, 120, 30, 30);
-
-    painter.setBrush(QColor(255, 255, 255, 36));
-    painter.drawEllipse(QRectF(16, 14, 92, 44));
-
-    QPainterPath bubbleLeft;
-    bubbleLeft.addRoundedRect(QRectF(20, 30, 58, 44), 14, 14);
-    bubbleLeft.moveTo(34, 74);
-    bubbleLeft.lineTo(27, 92);
-    bubbleLeft.lineTo(46, 79);
-    bubbleLeft.closeSubpath();
-    painter.setBrush(QColor(255, 255, 255, 245));
-    painter.drawPath(bubbleLeft);
-
-    QPainterPath bubbleRight;
-    bubbleRight.addRoundedRect(QRectF(53, 49, 56, 44), 14, 14);
-    bubbleRight.moveTo(88, 93);
-    bubbleRight.lineTo(98, 106);
-    bubbleRight.lineTo(82, 97);
-    bubbleRight.closeSubpath();
-    painter.setBrush(QColor(227, 242, 255, 238));
-    painter.drawPath(bubbleRight);
-
-    painter.setPen(QPen(QColor(36, 125, 255), 4, Qt::SolidLine, Qt::RoundCap));
-    painter.drawLine(QPointF(36, 51), QPointF(60, 51));
-    painter.drawLine(QPointF(36, 62), QPointF(54, 62));
-    painter.drawLine(QPointF(66, 69), QPointF(90, 69));
-    painter.drawLine(QPointF(66, 80), QPointF(84, 80));
-    return QIcon(pix);
+    const QIcon icon(":/app/app_icon.png");
+    if (!icon.isNull()) {
+        return icon;
+    }
+    return QIcon("app_icon.png");
 }
 
 constexpr char kBlobMagic[] = "LTC2";
@@ -250,6 +214,17 @@ QImage decodeAvatarPayload(const QString& payload) {
     QImage image;
     image.loadFromData(packed);
     return image;
+}
+
+QString avatarDataUrl(const QImage& image, int size, const QString& fallbackSeed) {
+    const QPixmap avatar = makeRoundAvatar(image, size, fallbackSeed);
+    QByteArray pngBytes;
+    QBuffer buffer(&pngBytes);
+    if (!buffer.open(QIODevice::WriteOnly)) {
+        return {};
+    }
+    avatar.toImage().save(&buffer, "PNG");
+    return QString("data:image/png;base64,%1").arg(QString::fromLatin1(pngBytes.toBase64()));
 }
 
 QIcon makeContactAvatarIcon(const QString& avatarPayload, const QString& fallbackSeed, bool online) {
@@ -499,7 +474,7 @@ void ChatWindow::setupUi() {
     auto* rail = new QFrame(body);
     rail->setObjectName("Rail");
     railPane_ = rail;
-    rail->setFixedWidth(82);
+    rail->setFixedWidth(76);
     auto* railLayout = new QVBoxLayout(rail);
     railLayout->setContentsMargins(10, 10, 10, 10);
     railLayout->setSpacing(10);
@@ -522,7 +497,7 @@ void ChatWindow::setupUi() {
     settingsBtn_->setCursor(Qt::PointingHandCursor);
     settingsBtn_->setToolButtonStyle(Qt::ToolButtonTextOnly);
 
-    railLayout->addSpacing(4);
+    railLayout->addSpacing(12);
     railLayout->addWidget(selfAvatarBtn_, 0, Qt::AlignHCenter | Qt::AlignTop);
     railLayout->addStretch(1);
     railLayout->addWidget(settingsBtn_, 0, Qt::AlignHCenter | Qt::AlignBottom);
@@ -633,6 +608,8 @@ void ChatWindow::setupUi() {
 
     conversationView_ = new QTextBrowser(chatContent);
     conversationView_->setOpenExternalLinks(true);
+    conversationView_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    conversationView_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     auto* composeArea = new QWidget(chatContent);
     composeArea->setObjectName("ComposeArea");
@@ -1502,17 +1479,21 @@ void ChatWindow::renderCurrentConversation() {
     }
 
     const QString peerTitle = displayName(*contact);
+    const QString incomingAvatar = avatarDataUrl(decodeAvatarPayload(contact->avatarPayload), 34, contact->name + contact->userId);
+    const Config selfConfig = app_.configCopy();
+    const QImage selfImage = decodeAvatarPayload(QString::fromStdString(selfConfig.avatarPayload));
+    const QString outgoingAvatar =
+        avatarDataUrl(selfImage, 34, QStringLiteral("self_") + QString::fromStdString(selfConfig.userId));
 
     QString html;
-    html += QString("<html><body style='font-family:\"%1\";font-size:13px;background:transparent;padding:4px 2px;'>")
+    html += QString(
+                "<html><body style='font-family:\"%1\";font-size:13px;background:transparent;padding:12px 14px 14px 14px;'>")
                 .arg(htmlEscape(appFontFamily));
     for (const ChatMessage& message : contact->messages) {
         const QString sender = message.incoming ? peerTitle : QStringLiteral("我");
-        const QString align = message.incoming ? "left" : "right";
-        const QString accent = message.incoming ? "#c7d2e0" : "#93b4ff";
-        const QString edgeStyle = message.incoming
-                                      ? QString("border-left:2px solid %1;padding-left:10px;").arg(accent)
-                                      : QString("border-right:2px solid %1;padding-right:10px;").arg(accent);
+        const QString bubbleBg = message.incoming ? "#ffffff" : "#dff6e7";
+        const QString bubbleBorder = message.incoming ? "#e2e8f0" : "#b7e7c8";
+        const QString avatarUrl = message.incoming ? incomingAvatar : outgoingAvatar;
 
         QString content;
         if (message.isFile) {
@@ -1527,12 +1508,38 @@ void ChatWindow::renderCurrentConversation() {
             content = htmlEscape(message.text).replace("\n", "<br/>");
         }
 
-        html += QString(
-                    "<div style='margin:10px 0;text-align:%1;'>"
-                    "<div style='font-size:11px;color:#8b95a7;margin-bottom:3px;'>%2  %3</div>"
-                    "<div style='display:inline-block;max-width:74%%;%4color:#0f172a;line-height:1.58;'>%5</div>"
-                    "</div>")
-                    .arg(align, htmlEscape(sender), timeText(message.timestampMs), edgeStyle, content);
+        const QString headerLine = QString("<div style='font-size:11px;color:#8b95a7;margin-bottom:4px;'>%1  %2</div>")
+                                       .arg(htmlEscape(sender), timeText(message.timestampMs));
+        const QString bubble = QString(
+                                   "<div style='display:inline-block;max-width:520px;background:%1;border:1px solid %2;"
+                                   "border-radius:12px;padding:8px 10px;color:#0f172a;line-height:1.58;'>%3</div>")
+                                   .arg(bubbleBg, bubbleBorder, content);
+
+        if (message.incoming) {
+            html += QString(
+                        "<table width='100%%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
+                        "<tr>"
+                        "<td width='40' valign='top' style='padding-top:2px;'>"
+                        "<img src='%1' width='34' height='34' style='border-radius:8px;'/>"
+                        "</td>"
+                        "<td align='left' valign='top'>%2%3</td>"
+                        "<td width='28'></td>"
+                        "</tr>"
+                        "</table>")
+                        .arg(avatarUrl, headerLine, bubble);
+        } else {
+            html += QString(
+                        "<table width='100%%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
+                        "<tr>"
+                        "<td width='28'></td>"
+                        "<td align='right' valign='top'>%1%2</td>"
+                        "<td width='40' valign='top' style='padding-top:2px;' align='right'>"
+                        "<img src='%3' width='34' height='34' style='border-radius:8px;'/>"
+                        "</td>"
+                        "</tr>"
+                        "</table>")
+                        .arg(headerLine, bubble, avatarUrl);
+        }
     }
     html += "</body></html>";
 

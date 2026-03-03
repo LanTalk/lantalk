@@ -1,4 +1,8 @@
 <RCC>
+  <qresource prefix="/app">
+    <file alias="app_icon.png">app_icon.png</file>
+    <file alias="app_icon.svg">app_icon.svg</file>
+  </qresource>
   <qresource prefix="/fonts">
     <file alias="LXGWWenKaiScreen.ttf">fonts/LXGWWenKaiScreen.ttf</file>
   </qresource>
