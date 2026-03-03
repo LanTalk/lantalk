@@ -337,23 +337,25 @@ bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
             return rect.contains(globalPos);
         };
 
-        if (inWidget(closeBtn_)) {
-            *result = HTCLOSE;
-            return true;
-        }
-        if (inWidget(maxBtn_)) {
-            *result = HTMAXBUTTON;
-            return true;
-        }
-        if (inWidget(minBtn_)) {
-            *result = HTMINBUTTON;
+        if (inWidget(closeBtn_) || inWidget(maxBtn_) || inWidget(minBtn_)) {
+            // Keep title buttons in client area so Qt click handlers always work.
+            *result = HTCLIENT;
             return true;
         }
 
         if (!isMaximized()) {
             const bool left = globalPos.x() >= winRect.left() && globalPos.x() < winRect.left() + border;
             const bool right = globalPos.x() <= winRect.right() && globalPos.x() > winRect.right() - border;
+            const bool top = globalPos.y() >= winRect.top() && globalPos.y() < winRect.top() + border;
             const bool bottom = globalPos.y() <= winRect.bottom() && globalPos.y() > winRect.bottom() - border;
+            if (left && top) {
+                *result = HTTOPLEFT;
+                return true;
+            }
+            if (right && top) {
+                *result = HTTOPRIGHT;
+                return true;
+            }
             if (left && bottom) {
                 *result = HTBOTTOMLEFT;
                 return true;
@@ -368,6 +370,10 @@ bool ChatWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
             }
             if (right) {
                 *result = HTRIGHT;
+                return true;
+            }
+            if (top) {
+                *result = HTTOP;
                 return true;
             }
             if (bottom) {
@@ -584,8 +590,8 @@ void ChatWindow::setupUi() {
 
     auto* chatContent = new QWidget(chatPane);
     auto* rightLayout = new QVBoxLayout(chatContent);
-    rightLayout->setContentsMargins(14, 12, 14, 12);
-    rightLayout->setSpacing(8);
+    rightLayout->setContentsMargins(0, 0, 0, 0);
+    rightLayout->setSpacing(0);
 
     conversationView_ = new QTextBrowser(chatContent);
     conversationView_->setOpenExternalLinks(true);
@@ -593,7 +599,7 @@ void ChatWindow::setupUi() {
     auto* composeArea = new QWidget(chatContent);
     composeArea->setObjectName("ComposeArea");
     auto* composeLayout = new QVBoxLayout(composeArea);
-    composeLayout->setContentsMargins(0, 0, 0, 0);
+    composeLayout->setContentsMargins(14, 8, 14, 12);
     composeLayout->setSpacing(6);
 
     auto* toolsRow = new QHBoxLayout();
@@ -629,7 +635,7 @@ void ChatWindow::setupUi() {
 
     inputEdit_ = new QTextEdit(chatContent);
     inputEdit_->setPlaceholderText("输入消息（Enter发送，Shift+Enter换行）");
-    inputEdit_->setFixedHeight(96);
+    inputEdit_->setMinimumHeight(72);
     inputEdit_->setAcceptRichText(false);
 
     sendBtn_ = new QPushButton("发送", chatContent);
@@ -640,18 +646,18 @@ void ChatWindow::setupUi() {
     inputRow->addWidget(inputEdit_, 1);
     inputRow->addWidget(sendBtn_, 0, Qt::AlignBottom);
 
-    composeLayout->addLayout(toolsRow);
-    composeLayout->addLayout(inputRow);
+    composeLayout->addLayout(toolsRow, 0);
+    composeLayout->addLayout(inputRow, 1);
 
     auto* chatSplitter = new QSplitter(Qt::Vertical, chatContent);
     chatSplitter->setObjectName("ChatSplitter");
     chatSplitter->setChildrenCollapsible(false);
-    chatSplitter->setHandleWidth(4);
+    chatSplitter->setHandleWidth(1);
     chatSplitter->addWidget(conversationView_);
     chatSplitter->addWidget(composeArea);
     chatSplitter->setStretchFactor(0, 1);
     chatSplitter->setStretchFactor(1, 0);
-    chatSplitter->setSizes(QList<int>{540, 200});
+    chatSplitter->setSizes(QList<int>{570, 170});
 
     rightLayout->addWidget(chatSplitter, 1);
 
@@ -665,11 +671,12 @@ void ChatWindow::setupUi() {
     leftCompositeLayout->addWidget(rail);
     leftCompositeLayout->addWidget(contactsPane, 1);
     leftComposite->setMinimumWidth(rail->width() + contactsPane->minimumWidth());
+    leftComposite->setMaximumWidth(rail->width() + contactsPane->maximumWidth());
 
     auto* mainSplitter = new QSplitter(Qt::Horizontal, body);
     mainSplitter->setObjectName("MainSplitter");
     mainSplitter->setChildrenCollapsible(false);
-    mainSplitter->setHandleWidth(4);
+    mainSplitter->setHandleWidth(1);
     mainSplitter->addWidget(leftComposite);
     mainSplitter->addWidget(chatPane);
     mainSplitter->setStretchFactor(0, 0);
@@ -759,7 +766,7 @@ void ChatWindow::setupUi() {
             font-size: 13px;
         }
         QWidget#ComposeArea {
-            border-top: 1px solid #dfe4eb;
+            border-top: none;
             background: transparent;
         }
         QTextEdit {
