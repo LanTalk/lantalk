@@ -614,7 +614,13 @@ void ChatWindow::setupUi() {
     controlRow->addWidget(closeBtn_);
     titleRight->addLayout(controlRow);
     titleRight->addSpacing(4);
-    titleRight->addWidget(viewProfileBtn_, 0, Qt::AlignHCenter);
+    auto* profileRow = new QHBoxLayout();
+    profileRow->setContentsMargins(0, 0, 0, 0);
+    profileRow->setSpacing(0);
+    profileRow->addStretch(1);
+    profileRow->addWidget(viewProfileBtn_, 0, Qt::AlignVCenter);
+    profileRow->addSpacing(6);
+    titleRight->addLayout(profileRow);
 
     titleLayout->addWidget(chatTitleLabel_, 1, Qt::AlignVCenter);
     titleLayout->addLayout(titleRight);
