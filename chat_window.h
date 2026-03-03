@@ -20,10 +20,11 @@ class QPushButton;
 class QResizeEvent;
 class QShowEvent;
 class QToolButton;
-class QTextBrowser;
 class QTextEdit;
 class QTimer;
 class QWidget;
+class QScrollArea;
+class QVBoxLayout;
 
 class ChatWindow final : public QMainWindow {
 public:
@@ -124,7 +125,9 @@ private:
     QToolButton* emojiBtn_ = nullptr;
     QLineEdit* searchEdit_ = nullptr;
     QListWidget* contactList_ = nullptr;
-    QTextBrowser* conversationView_ = nullptr;
+    QScrollArea* conversationView_ = nullptr;
+    QWidget* conversationList_ = nullptr;
+    QVBoxLayout* conversationLayout_ = nullptr;
     QTextEdit* inputEdit_ = nullptr;
     QPushButton* sendBtn_ = nullptr;
     QPushButton* sendFileBtn_ = nullptr;

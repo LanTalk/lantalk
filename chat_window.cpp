@@ -38,6 +38,7 @@
 #include <QPen>
 #include <QPushButton>
 #include <QRandomGenerator>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSet>
 #include <QSignalBlocker>
@@ -45,7 +46,6 @@
 #include <QShowEvent>
 #include <QSplitter>
 #include <QStringList>
-#include <QTextBrowser>
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolButton>
@@ -65,25 +65,6 @@
 namespace {
 QString htmlEscape(const QString& value) {
     return value.toHtmlEscaped();
-}
-
-QString injectSoftWrapHints(const QString& value, int chunkLen = 20) {
-    QString out;
-    out.reserve(value.size() + value.size() / std::max(1, chunkLen) + 8);
-    int runLen = 0;
-    for (const QChar ch : value) {
-        out.push_back(ch);
-        if (ch == '\n' || ch.isSpace()) {
-            runLen = 0;
-            continue;
-        }
-        ++runLen;
-        if (runLen >= chunkLen) {
-            out.push_back(QChar(0x200B));
-            runLen = 0;
-        }
-    }
-    return out;
 }
 
 QString wrapTextByPixelWidth(const QString& value, const QFontMetrics& metrics, int maxWidthPx) {
@@ -270,17 +251,6 @@ QImage decodeAvatarPayload(const QString& payload) {
     return image;
 }
 
-QString avatarDataUrl(const QImage& image, int size, const QString& fallbackSeed) {
-    const QPixmap avatar = makeRoundAvatar(image, size, fallbackSeed);
-    QByteArray pngBytes;
-    QBuffer buffer(&pngBytes);
-    if (!buffer.open(QIODevice::WriteOnly)) {
-        return {};
-    }
-    avatar.toImage().save(&buffer, "PNG");
-    return QString("data:image/png;base64,%1").arg(QString::fromLatin1(pngBytes.toBase64()));
-}
-
 QIcon makeContactAvatarIcon(const QString& avatarPayload, const QString& fallbackSeed, bool online) {
     const QImage image = decodeAvatarPayload(avatarPayload);
     QPixmap base = makeRoundAvatar(image, 30, fallbackSeed);
@@ -301,6 +271,22 @@ QIcon makeContactAvatarIcon(const QString& avatarPayload, const QString& fallbac
     icon.addPixmap(base, QIcon::Active, QIcon::Off);
     icon.addPixmap(base, QIcon::Active, QIcon::On);
     return icon;
+}
+
+void clearLayout(QLayout* layout) {
+    if (layout == nullptr) {
+        return;
+    }
+    while (QLayoutItem* item = layout->takeAt(0)) {
+        if (QLayout* child = item->layout()) {
+            clearLayout(child);
+            delete child;
+        }
+        if (QWidget* widget = item->widget()) {
+            delete widget;
+        }
+        delete item;
+    }
 }
 }  // namespace
 
@@ -661,10 +647,19 @@ void ChatWindow::setupUi() {
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(0);
 
-    conversationView_ = new QTextBrowser(chatContent);
-    conversationView_->setOpenExternalLinks(true);
+    conversationView_ = new QScrollArea(chatContent);
+    conversationView_->setObjectName("ConversationView");
+    conversationView_->setFrameShape(QFrame::NoFrame);
+    conversationView_->setWidgetResizable(true);
     conversationView_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     conversationView_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    conversationList_ = new QWidget(conversationView_);
+    conversationList_->setObjectName("ConversationList");
+    conversationLayout_ = new QVBoxLayout(conversationList_);
+    conversationLayout_->setContentsMargins(14, 12, 14, 14);
+    conversationLayout_->setSpacing(0);
+    conversationLayout_->addStretch(1);
+    conversationView_->setWidget(conversationList_);
 
     auto* composeArea = new QWidget(chatContent);
     composeArea->setObjectName("ComposeArea");
@@ -841,12 +836,32 @@ void ChatWindow::setupUi() {
             background: rgba(164, 173, 184, 0.14);
             color: #1e2430;
         }
-        QTextBrowser {
+        QScrollArea#ConversationView {
             border: none;
             border-bottom: 1px solid #dfe4eb;
             background: transparent;
-            color: #1f2937;
+        }
+        QWidget#ConversationList {
+            background: transparent;
+        }
+        QLabel#MessageMeta {
+            color: #8b95a7;
+            font-size: 11px;
+        }
+        QFrame#BubbleIncoming {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+        }
+        QFrame#BubbleOutgoing {
+            background: #dff6e7;
+            border: 1px solid #b7e7c8;
+            border-radius: 12px;
+        }
+        QLabel#BubbleText {
+            color: #0f172a;
             font-size: 13px;
+            line-height: 1.5;
         }
         QWidget#ComposeArea {
             border-top: none;
@@ -1529,123 +1544,117 @@ void ChatWindow::rebuildContactList() {
 
 void ChatWindow::renderCurrentConversation() {
     const Contact* contact = findContact(activeContactId_);
-    const QString appFontFamily = QApplication::font().family();
+    clearLayout(conversationLayout_);
+
     if (contact == nullptr) {
-        conversationView_->setHtml(
-            QString("<div style='color:#6b7280;font-size:16px;line-height:1.8;padding:26px 20px;"
-                    "font-family:\"%1\";'>"
-                    "请选择联系人开始聊天。"
-                    "</div>")
-                .arg(htmlEscape(appFontFamily)));
+        auto* placeholder = new QLabel("请选择联系人开始聊天。", conversationList_);
+        placeholder->setStyleSheet("color:#6b7280;font-size:16px;padding:26px 20px;");
+        placeholder->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        conversationLayout_->addWidget(placeholder);
+        conversationLayout_->addStretch(1);
         return;
     }
 
     const QString peerTitle = displayName(*contact);
-    const QString incomingAvatar = avatarDataUrl(decodeAvatarPayload(contact->avatarPayload), 34, contact->name + contact->userId);
+    const QPixmap incomingAvatar =
+        makeRoundAvatar(decodeAvatarPayload(contact->avatarPayload), 34, contact->name + contact->userId);
     const Config selfConfig = app_.configCopy();
     const QImage selfImage = decodeAvatarPayload(QString::fromStdString(selfConfig.avatarPayload));
-    const QString outgoingAvatar =
-        avatarDataUrl(selfImage, 34, QStringLiteral("self_") + QString::fromStdString(selfConfig.userId));
+    const QPixmap outgoingAvatar =
+        makeRoundAvatar(selfImage, 34, QStringLiteral("self_") + QString::fromStdString(selfConfig.userId));
+
     const int viewWidth = (conversationView_ != nullptr && conversationView_->viewport() != nullptr)
                               ? conversationView_->viewport()->width()
                               : width();
     const int bubbleMaxWidth = std::max(180, ((std::max(420, viewWidth) - 112) * 2) / 3);
-    const int bubbleContentMaxWidth = std::max(150, bubbleMaxWidth - 22);
+    const int bubbleContentMaxWidth = std::max(150, bubbleMaxWidth - 20);
     const QFontMetrics bubbleMetrics(conversationView_->font());
 
-    QString html;
-    html += QString(
-                "<html><body style='font-family:\"%1\";font-size:13px;background:transparent;padding:12px 14px 14px 14px;'>")
-                .arg(htmlEscape(appFontFamily));
     for (const ChatMessage& message : contact->messages) {
-        const QString sender = message.incoming ? peerTitle : QStringLiteral("我");
-        const QString bubbleBg = message.incoming ? "#ffffff" : "#dff6e7";
-        const QString bubbleBorder = message.incoming ? "#e2e8f0" : "#b7e7c8";
-        const QString avatarUrl = message.incoming ? incomingAvatar : outgoingAvatar;
+        auto* rowWidget = new QWidget(conversationList_);
+        auto* rowLayout = new QVBoxLayout(rowWidget);
+        rowLayout->setContentsMargins(0, 0, 0, 8);
+        rowLayout->setSpacing(3);
 
-        QString content;
+        const QString sender = message.incoming ? peerTitle : QStringLiteral("我");
+        auto* metaLabel = new QLabel(QString("%1  %2").arg(sender, timeText(message.timestampMs)), rowWidget);
+        metaLabel->setObjectName("MessageMeta");
+        metaLabel->setAlignment(message.incoming ? (Qt::AlignLeft | Qt::AlignVCenter) : (Qt::AlignRight | Qt::AlignVCenter));
+        if (message.incoming) {
+            metaLabel->setContentsMargins(42, 0, 0, 0);
+        } else {
+            metaLabel->setContentsMargins(0, 0, 42, 0);
+        }
+        rowLayout->addWidget(metaLabel);
+
+        auto* contentRow = new QWidget(rowWidget);
+        auto* contentLayout = new QHBoxLayout(contentRow);
+        contentLayout->setContentsMargins(0, 0, 0, 0);
+        contentLayout->setSpacing(8);
+
+        auto* avatarLabel = new QLabel(contentRow);
+        avatarLabel->setFixedSize(34, 34);
+        avatarLabel->setPixmap(message.incoming ? incomingAvatar : outgoingAvatar);
+        avatarLabel->setScaledContents(true);
+
+        auto* bubbleFrame = new QFrame(contentRow);
+        bubbleFrame->setObjectName(message.incoming ? "BubbleIncoming" : "BubbleOutgoing");
+        bubbleFrame->setMaximumWidth(bubbleMaxWidth);
+        bubbleFrame->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+
+        auto* bubbleLayout = new QVBoxLayout(bubbleFrame);
+        bubbleLayout->setContentsMargins(10, 8, 10, 8);
+        bubbleLayout->setSpacing(0);
+
+        auto* bubbleLabel = new QLabel(bubbleFrame);
+        bubbleLabel->setObjectName("BubbleText");
+        bubbleLabel->setWordWrap(true);
+        bubbleLabel->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::TextSelectableByMouse);
+        bubbleLabel->setMaximumWidth(bubbleContentMaxWidth);
+
         if (message.isFile) {
             QString fileLabel = message.fileName;
             if (fileLabel.isEmpty()) {
                 fileLabel = QFileInfo(message.filePath).fileName();
             }
             fileLabel = wrapTextByPixelWidth(fileLabel, bubbleMetrics, bubbleContentMaxWidth);
-            const QString link = QUrl::fromLocalFile(message.filePath).toString();
             QString labelHtml = htmlEscape(fileLabel);
             labelHtml.replace("\n", "<br/>");
-            content = QString("<a style='color:#1d4ed8;text-decoration:none;word-break:break-all;' href='%1'>文件：%2</a>")
-                          .arg(link, labelHtml);
+            const QString link = QUrl::fromLocalFile(message.filePath).toString();
+            bubbleLabel->setTextFormat(Qt::RichText);
+            bubbleLabel->setOpenExternalLinks(true);
+            bubbleLabel->setText(
+                QString("<a style='color:#1d4ed8;text-decoration:none;' href='%1'>文件：%2</a>").arg(link, labelHtml));
         } else {
-            QString wrappedText = wrapTextByPixelWidth(message.text, bubbleMetrics, bubbleContentMaxWidth);
-            wrappedText = injectSoftWrapHints(wrappedText, 48);
-            content = htmlEscape(wrappedText);
-            content.replace(QString(QChar(0x200B)), "&#8203;");
-            content.replace("\n", "<br/>");
+            const QString wrappedText = wrapTextByPixelWidth(message.text, bubbleMetrics, bubbleContentMaxWidth);
+            bubbleLabel->setTextFormat(Qt::PlainText);
+            bubbleLabel->setText(wrappedText);
         }
-
-        const QString senderTime = QString("%1  %2").arg(htmlEscape(sender), timeText(message.timestampMs));
-        const QString bubble = QString(
-                                   "<span style='display:inline-block;max-width:%1px;background:%2;border:1px solid %3;"
-                                   "border-radius:12px;padding:8px 10px;color:#0f172a;line-height:1.58;"
-                                   "white-space:pre-wrap;word-wrap:break-word;word-break:break-all;text-align:left;'>%4</span>")
-                                   .arg(bubbleMaxWidth)
-                                   .arg(bubbleBg, bubbleBorder, content);
+        bubbleLayout->addWidget(bubbleLabel);
 
         if (message.incoming) {
-            html += QString(
-                        "<table width='100%%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
-                        "<tr>"
-                        "<td style='padding:0 0 3px 42px;font-size:11px;color:#8b95a7;text-align:left;'>%1</td>"
-                        "</tr>"
-                        "<tr>"
-                        "<td align='left'>"
-                        "<table width='100%%' cellspacing='0' cellpadding='0'>"
-                        "<tr>"
-                        "<td width='34' valign='top' style='vertical-align:top;'>"
-                        "<img src='%2' width='34' height='34' style='border-radius:8px;display:block;'/>"
-                        "</td>"
-                        "<td width='8'></td>"
-                        "<td valign='top' style='vertical-align:top;'>%3</td>"
-                        "<td width='100%%'></td>"
-                        "</tr>"
-                        "</table>"
-                        "</td>"
-                        "</tr>"
-                        "</table>")
-                        .arg(senderTime)
-                        .arg(avatarUrl)
-                        .arg(bubble);
+            contentLayout->addWidget(avatarLabel, 0, Qt::AlignTop);
+            contentLayout->addWidget(bubbleFrame, 0, Qt::AlignTop);
+            contentLayout->addStretch(1);
         } else {
-            html += QString(
-                        "<table width='100%%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
-                        "<tr>"
-                        "<td style='padding:0 42px 3px 0;font-size:11px;color:#8b95a7;text-align:right;'>%1</td>"
-                        "</tr>"
-                        "<tr>"
-                        "<td align='right'>"
-                        "<table width='100%%' cellspacing='0' cellpadding='0'>"
-                        "<tr>"
-                        "<td width='100%%'></td>"
-                        "<td valign='top' style='vertical-align:top;'>%2</td>"
-                        "<td width='8'></td>"
-                        "<td width='34' valign='top' style='vertical-align:top;'>"
-                        "<img src='%3' width='34' height='34' style='border-radius:8px;display:block;'/>"
-                        "</td>"
-                        "</tr>"
-                        "</table>"
-                        "</td>"
-                        "</tr>"
-                        "</table>")
-                        .arg(senderTime)
-                        .arg(bubble)
-                        .arg(avatarUrl);
+            contentLayout->addStretch(1);
+            contentLayout->addWidget(bubbleFrame, 0, Qt::AlignTop);
+            contentLayout->addWidget(avatarLabel, 0, Qt::AlignTop);
         }
-    }
-    html += "</body></html>";
 
-    conversationView_->setHtml(html);
+        rowLayout->addWidget(contentRow);
+        conversationLayout_->addWidget(rowWidget);
+    }
+
+    conversationLayout_->addStretch(1);
+
     if (QScrollBar* bar = conversationView_->verticalScrollBar()) {
         bar->setValue(bar->maximum());
+        QTimer::singleShot(0, this, [this]() {
+            if (QScrollBar* delayedBar = conversationView_->verticalScrollBar()) {
+                delayedBar->setValue(delayedBar->maximum());
+            }
+        });
     }
 }
 
