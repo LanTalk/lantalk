@@ -1119,19 +1119,21 @@ void ChatWindow::openSettingsDialog() {
     dialog.setWindowTitle("个人设置");
     dialog.resize(470, 390);
     QFont dialogFont = font();
-    dialogFont.setPointSize(10);
+    if (dialogFont.pointSize() < 11) {
+        dialogFont.setPointSize(11);
+    }
     dialogFont.setHintingPreference(QFont::PreferFullHinting);
     dialog.setFont(dialogFont);
     dialog.setStyleSheet(R"(
-        QLabel { font-size: 13px; }
+        QLabel { font-size: 14px; }
         QLineEdit {
             min-height: 30px;
-            font-size: 13px;
+            font-size: 14px;
             padding: 0 8px;
         }
         QPushButton {
             min-height: 32px;
-            font-size: 13px;
+            font-size: 14px;
             padding: 0 12px;
         }
     )");
@@ -1231,19 +1233,21 @@ void ChatWindow::openContactProfileDialog() {
     dialog.setWindowTitle("查看资料");
     dialog.resize(450, 372);
     QFont dialogFont = font();
-    dialogFont.setPointSize(10);
+    if (dialogFont.pointSize() < 11) {
+        dialogFont.setPointSize(11);
+    }
     dialogFont.setHintingPreference(QFont::PreferFullHinting);
     dialog.setFont(dialogFont);
     dialog.setStyleSheet(R"(
-        QLabel { font-size: 13px; }
+        QLabel { font-size: 14px; }
         QLineEdit {
             min-height: 30px;
-            font-size: 13px;
+            font-size: 14px;
             padding: 0 8px;
         }
         QPushButton {
             min-height: 32px;
-            font-size: 13px;
+            font-size: 14px;
             padding: 0 12px;
         }
     )");
@@ -1261,7 +1265,7 @@ void ChatWindow::openContactProfileDialog() {
     auto* nameLabel = new QLabel(displayName(*contact), &dialog);
     nameLabel->setStyleSheet("font-size:16px;font-weight:700;color:#0f172a;");
     auto* stateLabel = new QLabel("状态  ●", &dialog);
-    stateLabel->setStyleSheet(contact->online ? "color:#16a34a;font-size:12px;" : "color:#64748b;font-size:12px;");
+    stateLabel->setStyleSheet(contact->online ? "color:#16a34a;font-size:13px;" : "color:#64748b;font-size:13px;");
     titleCol->addWidget(nameLabel);
     titleCol->addWidget(stateLabel);
     titleCol->addStretch(1);
@@ -1290,7 +1294,7 @@ void ChatWindow::openContactProfileDialog() {
     form->addRow("IP", ipLabel);
 
     auto* bindTip = new QLabel("备注与用户ID绑定，同一用户会一直使用该备注。", &dialog);
-    bindTip->setStyleSheet("color:#64748b;font-size:12px;");
+    bindTip->setStyleSheet("color:#64748b;font-size:13px;");
     bindTip->setWordWrap(true);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
