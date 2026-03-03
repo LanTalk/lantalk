@@ -107,7 +107,5 @@
     <file alias="default_102.png">avatars/default_102.png</file>
     <file alias="default_103.png">avatars/default_103.png</file>
     <file alias="default_104.png">avatars/default_104.png</file>
-    <file alias="default_105.png">avatars/default_105.png</file>
-    <file alias="default_106.png">avatars/default_106.png</file>
   </qresource>
 </RCC>
