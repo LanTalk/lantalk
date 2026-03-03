@@ -5,6 +5,10 @@
 #include <QEvent>
 #include <QMainWindow>
 #include <QByteArray>
+#include <QHash>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -25,6 +29,8 @@ class QTimer;
 class QWidget;
 class QScrollArea;
 class QVBoxLayout;
+class QNetworkAccessManager;
+class QNetworkReply;
 
 class ChatWindow final : public QMainWindow {
 public:
@@ -40,6 +46,13 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    enum class PresenceKind {
+        Offline = 0,
+        Lan = 1,
+        SignalP2P = 2,
+        SignalWs = 3,
+    };
+
     struct ChatMessage {
         qint64 timestampMs = 0;
         bool incoming = false;
@@ -56,6 +69,11 @@ private:
         QString ip;
         QString avatarPayload;
         bool online = false;
+        bool lanOnline = false;
+        bool signalOnline = false;
+        PresenceKind presence = PresenceKind::Offline;
+        QString signalMode;
+        QString signalServer;
         int unread = 0;
         qint64 lastSeenMs = 0;
         std::vector<ChatMessage> messages;
@@ -71,6 +89,10 @@ private:
     void openContactProfileDialog();
 
     void refreshOnlinePeers();
+    void refreshSignalingPeers();
+    void pollSignalMessages();
+    void syncSignalPresence(bool* changed);
+    void appendSignalOutgoingMessage(Contact& contact, const QString& text, qint64 timestampMs);
     void rebuildContactList();
     void renderCurrentConversation();
     void updateChatHeader();
@@ -98,9 +120,16 @@ private:
     void ensureDefaultAvatarLibrary();
     QByteArray buildAvatarPayload(const QString& avatarPath) const;
     void syncLocalAvatarToNetwork();
+    QStringList normalizeSignalServers(const QStringList& rawServers) const;
+    bool signalRequest(const QString& url,
+                       const QString& method,
+                       const QJsonObject* body,
+                       QJsonDocument* outDoc,
+                       QString* errorText) const;
     void applySelfAvatar();
     QString localIpSummary() const;
     QString displayName(const Contact& contact) const;
+    QString presenceText(PresenceKind kind) const;
     void refreshWindowBorder();
 
     uint64_t storageSeed() const;
@@ -136,4 +165,11 @@ private:
     QString activeContactId_;
     QString selfAvatarPath_;
     QStringList defaultAvatarPaths_;
+    QStringList signalingServers_;
+    QNetworkAccessManager* signalingNet_ = nullptr;
+    QTimer* signalingTimer_ = nullptr;
+    QHash<QString, qint64> signalAfterByServer_;
+    QHash<QString, QString> signalServerByUserId_;
+    QSet<QString> signalP2PUsers_;
+    QSet<QString> signalWsUsers_;
 };

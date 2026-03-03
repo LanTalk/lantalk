@@ -579,6 +579,28 @@ public:
         return true;
     }
 
+    void upsertSignalPeer(const std::string& userId,
+                          const std::string& name,
+                          const std::string& ip,
+                          uint16_t port,
+                          uint64_t e2eePublic,
+                          const std::string& avatarPayload) {
+        const std::string safeUserId = trim(userId);
+        const std::string safeIp = trim(ip);
+        if (safeUserId.empty() || safeIp.empty() || port == 0 || e2eePublic <= 1 || e2eePublic >= (kDhPrime - 1)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(peersMutex_);
+        Peer& peer = peers_[safeUserId];
+        peer.userId = safeUserId;
+        peer.name = sanitizeHelloField(name.empty() ? safeUserId : name);
+        peer.ip = safeIp;
+        peer.avatarPayload = sanitizeHelloField(avatarPayload);
+        peer.port = port;
+        peer.e2eePublic = e2eePublic;
+        peer.lastSeen = std::chrono::steady_clock::now();
+    }
+
     bool updateLocalUserName(const std::string& newName, std::string* errorOut = nullptr) {
         std::string safeName = sanitizeHelloField(newName);
         if (safeName.empty()) {

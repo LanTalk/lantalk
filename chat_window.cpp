@@ -8,6 +8,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QEventLoop>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -32,7 +33,10 @@
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QNetworkAccessManager>
 #include <QNetworkInterface>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
@@ -50,6 +54,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QCursor>
@@ -251,7 +256,7 @@ QImage decodeAvatarPayload(const QString& payload) {
     return image;
 }
 
-QIcon makeContactAvatarIcon(const QString& avatarPayload, const QString& fallbackSeed, bool online) {
+QIcon makeContactAvatarIcon(const QString& avatarPayload, const QString& fallbackSeed, const QColor& dotColor) {
     const QImage image = decodeAvatarPayload(avatarPayload);
     QPixmap base = makeRoundAvatar(image, 30, fallbackSeed);
 
@@ -259,7 +264,7 @@ QIcon makeContactAvatarIcon(const QString& avatarPayload, const QString& fallbac
     painter.setRenderHint(QPainter::Antialiasing, true);
     const QRectF dotRect(20.0, 20.0, 10.0, 10.0);
     painter.setPen(QPen(Qt::white, 1.2));
-    painter.setBrush(online ? QColor(34, 197, 94) : QColor(148, 163, 184));
+    painter.setBrush(dotColor);
     painter.drawEllipse(dotRect);
 
     // Keep avatar identical in selected/active states to avoid Qt palette tinting.
@@ -293,6 +298,7 @@ void clearLayout(QLayout* layout) {
 ChatWindow::ChatWindow() {
     setupUi();
     bindEvents();
+    signalingNet_ = new QNetworkAccessManager(this);
 
     app_.setEventCallback([](const std::string&) {});
     app_.setMessageCallback([this](const MessageEvent& event) {
@@ -324,15 +330,28 @@ ChatWindow::ChatWindow() {
     applySelfAvatar();
     loadContacts();
     refreshOnlinePeers();
+    refreshSignalingPeers();
+    pollSignalMessages();
     updateChatHeader();
 
     refreshTimer_ = new QTimer(this);
     refreshTimer_->setInterval(1000);
     connect(refreshTimer_, &QTimer::timeout, this, [this]() { refreshOnlinePeers(); });
     refreshTimer_->start();
+
+    signalingTimer_ = new QTimer(this);
+    signalingTimer_->setInterval(3000);
+    connect(signalingTimer_, &QTimer::timeout, this, [this]() {
+        refreshSignalingPeers();
+        pollSignalMessages();
+    });
+    signalingTimer_->start();
 }
 
 ChatWindow::~ChatWindow() {
+    if (signalingTimer_ != nullptr) {
+        signalingTimer_->stop();
+    }
     app_.setMessageCallback(nullptr);
     app_.setEventCallback(nullptr);
     app_.shutdown();
@@ -1055,8 +1074,31 @@ void ChatWindow::onSendMessage() {
 
     std::string error;
     if (!app_.sendTextToUserId(userId.toStdString(), text.toStdString(), &error)) {
-        QMessageBox::warning(this, "发送失败", QString::fromStdString(error.empty() ? "消息发送失败。" : error));
-        return;
+        Contact* contact = findContact(userId);
+        if (contact == nullptr || contact->signalServer.isEmpty() || contact->presence == PresenceKind::Offline) {
+            QMessageBox::warning(this, "发送失败", QString::fromStdString(error.empty() ? "消息发送失败。" : error));
+            return;
+        }
+
+        const Config cfg = app_.configCopy();
+        const qint64 now = nowMs();
+        const QString postUrl = contact->signalServer + "/v1/messages/send";
+        QJsonObject req;
+        req.insert("fromUserId", QString::fromStdString(cfg.userId));
+        req.insert("fromName", QString::fromStdString(cfg.userName));
+        req.insert("fromAvatar", QString::fromStdString(cfg.avatarPayload));
+        req.insert("toUserId", contact->userId);
+        req.insert("text", text);
+        req.insert("timestampMs", static_cast<double>(now));
+
+        QJsonDocument respDoc;
+        QString signalErr;
+        if (!signalRequest(postUrl, "POST", &req, &respDoc, &signalErr)) {
+            const QString baseError = QString::fromStdString(error.empty() ? "消息发送失败。" : error);
+            QMessageBox::warning(this, "发送失败", baseError + "\n信令兜底失败：" + signalErr);
+            return;
+        }
+        appendSignalOutgoingMessage(*contact, text, now);
     }
 
     inputEdit_->clear();
@@ -1069,6 +1111,18 @@ void ChatWindow::onSendFile() {
         return;
     }
 
+    Contact* contact = findContact(userId);
+    if (contact != nullptr) {
+        if (contact->presence == PresenceKind::SignalWs) {
+            QMessageBox::information(this, "提示", "当前联系人使用WS兜底通道，暂不支持发送文件。");
+            return;
+        }
+        if (contact->presence == PresenceKind::Offline) {
+            QMessageBox::information(this, "提示", "联系人当前离线。");
+            return;
+        }
+    }
+
     const QString filePath = QFileDialog::getOpenFileName(this, "选择要发送的文件");
     if (filePath.isEmpty()) {
         return;
@@ -1077,6 +1131,10 @@ void ChatWindow::onSendFile() {
     std::string error;
     const fs::path nativePath(filePath.toStdWString());
     if (!app_.sendFileToUserId(userId.toStdString(), nativePath, &error)) {
+        if (contact != nullptr && contact->presence == PresenceKind::SignalP2P) {
+            QMessageBox::information(this, "提示", "P2P连接失败，暂不支持发送文件。");
+            return;
+        }
         QMessageBox::warning(this, "发送失败", QString::fromStdString(error.empty() ? "文件发送失败。" : error));
     }
 }
@@ -1249,6 +1307,13 @@ void ChatWindow::openSettingsDialog() {
     dataLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     form->addRow("数据目录", dataLabel);
 
+    auto* signalEdit = new QTextEdit(&dialog);
+    signalEdit->setAcceptRichText(false);
+    signalEdit->setPlaceholderText("一行一个，例如：\nhttps://lantalk-signal.example.workers.dev");
+    signalEdit->setMinimumHeight(90);
+    signalEdit->setPlainText(signalingServers_.join("\n"));
+    form->addRow("信令服务器", signalEdit);
+
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
 
     connect(pickAvatarBtn, &QPushButton::clicked, &dialog, [&]() {
@@ -1293,9 +1358,12 @@ void ChatWindow::openSettingsDialog() {
     }
 
     selfAvatarPath_ = selectedAvatar;
+    signalingServers_ = normalizeSignalServers(signalEdit->toPlainText().split('\n'));
     saveProfile();
     applySelfAvatar();
     syncLocalAvatarToNetwork();
+    refreshSignalingPeers();
+    pollSignalMessages();
 }
 
 void ChatWindow::openContactProfileDialog() {
@@ -1340,8 +1408,16 @@ void ChatWindow::openContactProfileDialog() {
     auto* titleCol = new QVBoxLayout();
     auto* nameLabel = new QLabel(displayName(*contact), &dialog);
     nameLabel->setStyleSheet("font-size:16px;font-weight:700;color:#0f172a;");
-    auto* stateLabel = new QLabel("状态  ●", &dialog);
-    stateLabel->setStyleSheet(contact->online ? "color:#16a34a;font-size:13px;" : "color:#64748b;font-size:13px;");
+    auto* stateLabel = new QLabel(QString("状态  %1").arg(presenceText(contact->presence)), &dialog);
+    QString stateColor = "#64748b";
+    if (contact->presence == PresenceKind::Lan) {
+        stateColor = "#16a34a";
+    } else if (contact->presence == PresenceKind::SignalP2P) {
+        stateColor = "#2563eb";
+    } else if (contact->presence == PresenceKind::SignalWs) {
+        stateColor = "#d97706";
+    }
+    stateLabel->setStyleSheet(QString("color:%1;font-size:13px;").arg(stateColor));
     titleCol->addWidget(nameLabel);
     titleCol->addWidget(stateLabel);
     titleCol->addStretch(1);
@@ -1413,8 +1489,8 @@ void ChatWindow::refreshOnlinePeers() {
 
     for (auto& contact : contacts_) {
         const bool shouldOnline = onlineIds.contains(contact.userId);
-        if (contact.online != shouldOnline) {
-            contact.online = shouldOnline;
+        if (contact.lanOnline != shouldOnline) {
+            contact.lanOnline = shouldOnline;
             changed = true;
         }
     }
@@ -1449,12 +1525,14 @@ void ChatWindow::refreshOnlinePeers() {
             contact.avatarPayload = newAvatarPayload;
             changed = true;
         }
-        if (!contact.online) {
-            contact.online = true;
+        if (!contact.lanOnline) {
+            contact.lanOnline = true;
             changed = true;
         }
         contact.lastSeenMs = now;
     }
+
+    syncSignalPresence(&changed);
 
     // Keep only offline contacts that have at least one chat message.
     const size_t beforeCount = contacts_.size();
@@ -1474,6 +1552,292 @@ void ChatWindow::refreshOnlinePeers() {
         renderCurrentConversation();
         updateChatHeader();
     }
+}
+
+void ChatWindow::refreshSignalingPeers() {
+    const Config cfg = app_.configCopy();
+    const QString selfId = QString::fromStdString(cfg.userId).trimmed();
+    if (selfId.isEmpty()) {
+        return;
+    }
+
+    QSet<QString> p2pUsers;
+    QSet<QString> wsUsers;
+    QHash<QString, QString> serverByUserId;
+    bool changed = false;
+
+    if (!signalingServers_.isEmpty()) {
+        QJsonArray localIps;
+        for (const QHostAddress& addr : QNetworkInterface::allAddresses()) {
+            if (addr.protocol() != QAbstractSocket::IPv4Protocol || addr.isLoopback()) {
+                continue;
+            }
+            localIps.push_back(addr.toString());
+        }
+
+        for (const QString& server : signalingServers_) {
+            QJsonObject presenceReq;
+            presenceReq.insert("userId", selfId);
+            presenceReq.insert("name", QString::fromStdString(cfg.userName));
+            presenceReq.insert("avatarPayload", QString::fromStdString(cfg.avatarPayload));
+            presenceReq.insert("listenPort", static_cast<int>(cfg.listenPort));
+            presenceReq.insert("e2eePublic", QString::number(cfg.e2eePublic));
+            presenceReq.insert("localIps", localIps);
+            QJsonDocument ignored;
+            QString ignoredErr;
+            signalRequest(server + "/v1/presence", "POST", &presenceReq, &ignored, &ignoredErr);
+
+            QUrl peersUrl(server + "/v1/peers");
+            QUrlQuery query;
+            query.addQueryItem("userId", selfId);
+            peersUrl.setQuery(query);
+
+            QJsonDocument peersDoc;
+            QString peersErr;
+            if (!signalRequest(peersUrl.toString(), "GET", nullptr, &peersDoc, &peersErr)) {
+                continue;
+            }
+            if (!peersDoc.isObject()) {
+                continue;
+            }
+            const QJsonArray peers = peersDoc.object().value("peers").toArray();
+            for (const QJsonValue& peerValue : peers) {
+                if (!peerValue.isObject()) {
+                    continue;
+                }
+                const QJsonObject peerObj = peerValue.toObject();
+                const QString userId = peerObj.value("userId").toString().trimmed();
+                if (userId.isEmpty() || userId == selfId) {
+                    continue;
+                }
+
+                const QString mode = peerObj.value("mode").toString("ws").toLower();
+                const bool isP2P = (mode == "p2p");
+                if (isP2P) {
+                    p2pUsers.insert(userId);
+                    wsUsers.remove(userId);
+                    serverByUserId[userId] = server;
+                } else if (!p2pUsers.contains(userId)) {
+                    wsUsers.insert(userId);
+                    if (!serverByUserId.contains(userId)) {
+                        serverByUserId[userId] = server;
+                    }
+                }
+
+                const bool isNewContact = (findContact(userId) == nullptr);
+                Contact& contact = ensureContact(userId);
+                if (isNewContact) {
+                    changed = true;
+                }
+                const QString name = peerObj.value("name").toString().trimmed();
+                const QString ip = peerObj.value("ip").toString().trimmed();
+                const QString avatar = peerObj.value("avatarPayload").toString().trimmed();
+                if (!name.isEmpty() && contact.name != name) {
+                    contact.name = name;
+                    changed = true;
+                }
+                if (!ip.isEmpty() && contact.ip != ip) {
+                    contact.ip = ip;
+                    changed = true;
+                }
+                if (!avatar.isEmpty() && contact.avatarPayload != avatar) {
+                    contact.avatarPayload = avatar;
+                    changed = true;
+                }
+                contact.lastSeenMs = nowMs();
+
+                if (isP2P) {
+                    bool okPort = false;
+                    const int port = peerObj.value("port").toInt(0);
+                    const uint16_t safePort = (port > 0 && port <= 65535) ? static_cast<uint16_t>(port) : 0;
+                    okPort = (safePort > 0);
+                    bool okKey = false;
+                    const QString pubRaw = peerObj.value("e2eePublic").toVariant().toString();
+                    const uint64_t pubKey = pubRaw.toULongLong(&okKey);
+                    if (okPort && okKey && !ip.isEmpty()) {
+                        app_.upsertSignalPeer(userId.toStdString(),
+                                              contact.name.toStdString(),
+                                              ip.toStdString(),
+                                              safePort,
+                                              pubKey,
+                                              contact.avatarPayload.toStdString());
+                    }
+                }
+            }
+        }
+    }
+
+    if (signalP2PUsers_ != p2pUsers) {
+        signalP2PUsers_ = p2pUsers;
+        changed = true;
+    }
+    if (signalWsUsers_ != wsUsers) {
+        signalWsUsers_ = wsUsers;
+        changed = true;
+    }
+    if (signalServerByUserId_ != serverByUserId) {
+        signalServerByUserId_ = serverByUserId;
+        changed = true;
+    }
+
+    syncSignalPresence(&changed);
+    if (changed) {
+        saveContacts();
+        rebuildContactList();
+        renderCurrentConversation();
+        updateChatHeader();
+    }
+}
+
+void ChatWindow::pollSignalMessages() {
+    const Config cfg = app_.configCopy();
+    const QString selfId = QString::fromStdString(cfg.userId).trimmed();
+    if (selfId.isEmpty() || signalingServers_.isEmpty()) {
+        return;
+    }
+
+    bool changed = false;
+    for (const QString& server : signalingServers_) {
+        const qint64 after = signalAfterByServer_.value(server, 0);
+        QUrl pullUrl(server + "/v1/messages/pull");
+        QUrlQuery query;
+        query.addQueryItem("userId", selfId);
+        query.addQueryItem("after", QString::number(after));
+        pullUrl.setQuery(query);
+
+        QJsonDocument doc;
+        QString err;
+        if (!signalRequest(pullUrl.toString(), "GET", nullptr, &doc, &err) || !doc.isObject()) {
+            continue;
+        }
+        const QJsonArray messages = doc.object().value("messages").toArray();
+        qint64 maxTs = after;
+        for (const QJsonValue& value : messages) {
+            if (!value.isObject()) {
+                continue;
+            }
+            const QJsonObject obj = value.toObject();
+            const QString id = obj.value("id").toString();
+            if (!id.isEmpty()) {
+                const QString key = server + "|" + id;
+                if (seenSignalMsgIds_.contains(key)) {
+                    continue;
+                }
+                seenSignalMsgIds_.insert(key);
+            }
+
+            const QString fromId = obj.value("fromUserId").toString().trimmed();
+            const QString text = obj.value("text").toString();
+            if (fromId.isEmpty() || fromId == selfId || text.isEmpty()) {
+                continue;
+            }
+
+            const qint64 ts = static_cast<qint64>(obj.value("timestampMs").toDouble(static_cast<double>(nowMs())));
+            if (ts > maxTs) {
+                maxTs = ts;
+            }
+
+            Contact& contact = ensureContact(fromId);
+            const QString fromName = obj.value("fromName").toString().trimmed();
+            const QString avatar = obj.value("fromAvatar").toString().trimmed();
+            if (!fromName.isEmpty() && contact.name != fromName) {
+                contact.name = fromName;
+            }
+            if (!avatar.isEmpty() && contact.avatarPayload != avatar) {
+                contact.avatarPayload = avatar;
+            }
+            contact.signalServer = server;
+            contact.signalMode = "ws";
+            contact.lastSeenMs = nowMs();
+            signalWsUsers_.insert(fromId);
+            signalP2PUsers_.remove(fromId);
+            signalServerByUserId_[fromId] = server;
+
+            ChatMessage message;
+            message.timestampMs = ts;
+            message.incoming = true;
+            message.isFile = false;
+            message.text = text;
+            contact.messages.push_back(message);
+            if (activeContactId_ != fromId) {
+                contact.unread += 1;
+            }
+            saveHistory(contact);
+            changed = true;
+        }
+        signalAfterByServer_[server] = maxTs;
+    }
+
+    syncSignalPresence(&changed);
+    if (changed) {
+        saveContacts();
+        rebuildContactList();
+        renderCurrentConversation();
+        updateChatHeader();
+    }
+}
+
+void ChatWindow::syncSignalPresence(bool* changed) {
+    if (changed == nullptr) {
+        return;
+    }
+    for (Contact& contact : contacts_) {
+        const bool signalP2P = signalP2PUsers_.contains(contact.userId);
+        const bool signalWs = signalWsUsers_.contains(contact.userId);
+        const bool signalOnline = signalP2P || signalWs;
+
+        PresenceKind nextPresence = PresenceKind::Offline;
+        if (contact.lanOnline) {
+            nextPresence = PresenceKind::Lan;
+        } else if (signalP2P) {
+            nextPresence = PresenceKind::SignalP2P;
+        } else if (signalWs) {
+            nextPresence = PresenceKind::SignalWs;
+        }
+        const bool nextOnline = nextPresence != PresenceKind::Offline;
+
+        if (contact.signalOnline != signalOnline) {
+            contact.signalOnline = signalOnline;
+            *changed = true;
+        }
+        if (contact.presence != nextPresence) {
+            contact.presence = nextPresence;
+            *changed = true;
+        }
+        if (contact.online != nextOnline) {
+            contact.online = nextOnline;
+            *changed = true;
+        }
+
+        const QString nextServer = signalOnline ? signalServerByUserId_.value(contact.userId) : QString();
+        const QString nextMode = signalP2P ? QStringLiteral("p2p") : (signalWs ? QStringLiteral("ws") : QString());
+        if (contact.signalServer != nextServer) {
+            contact.signalServer = nextServer;
+            *changed = true;
+        }
+        if (contact.signalMode != nextMode) {
+            contact.signalMode = nextMode;
+            *changed = true;
+        }
+        if (nextOnline) {
+            contact.lastSeenMs = std::max(contact.lastSeenMs, nowMs());
+        }
+    }
+}
+
+void ChatWindow::appendSignalOutgoingMessage(Contact& contact, const QString& text, qint64 timestampMs) {
+    ChatMessage message;
+    message.timestampMs = timestampMs;
+    message.incoming = false;
+    message.isFile = false;
+    message.text = text;
+    contact.messages.push_back(message);
+    contact.lastSeenMs = timestampMs;
+    saveHistory(contact);
+    saveContacts();
+    rebuildContactList();
+    renderCurrentConversation();
+    updateChatHeader();
 }
 
 void ChatWindow::rebuildContactList() {
@@ -1519,10 +1883,24 @@ void ChatWindow::rebuildContactList() {
             text += QString("  [%1]").arg(contact.unread);
         }
 
-        auto* item = new QListWidgetItem(makeContactAvatarIcon(contact.avatarPayload, contact.name + contact.userId, contact.online), text);
+        QColor dotColor(148, 163, 184);
+        if (contact.presence == PresenceKind::Lan) {
+            dotColor = QColor(34, 197, 94);
+        } else if (contact.presence == PresenceKind::SignalP2P) {
+            dotColor = QColor(59, 130, 246);
+        } else if (contact.presence == PresenceKind::SignalWs) {
+            dotColor = QColor(245, 158, 11);
+        }
+        auto* item = new QListWidgetItem(makeContactAvatarIcon(contact.avatarPayload, contact.name + contact.userId, dotColor), text);
         item->setData(Qt::UserRole, contact.userId);
 
-        QString toolTip = QString("用户ID: %1\nIP: %2").arg(contact.userId, contact.ip);
+        QString toolTip = QString("用户ID: %1\nIP: %2\n状态: %3")
+                              .arg(contact.userId,
+                                   contact.ip.isEmpty() ? QStringLiteral("未知") : contact.ip,
+                                   presenceText(contact.presence));
+        if (!contact.signalServer.isEmpty()) {
+            toolTip += QString("\n信令: %1").arg(contact.signalServer);
+        }
         if (!contact.remark.isEmpty()) {
             toolTip += QString("\n备注: %1").arg(contact.remark);
         }
@@ -1694,8 +2072,10 @@ void ChatWindow::handleMessageEvent(const MessageEvent& event) {
         contact.ip = peerIp;
     }
     const qint64 now = nowMs();
-    contact.online = true;
+    contact.lanOnline = true;
     contact.lastSeenMs = now;
+    bool presenceChanged = false;
+    syncSignalPresence(&presenceChanged);
 
     ChatMessage message;
     const qint64 eventTs = (event.timestamp > 0) ? static_cast<qint64>(event.timestamp) * 1000 : 0;
@@ -1856,6 +2236,11 @@ void ChatWindow::loadContacts() {
         contact.ip = obj.value("ip").toString();
         contact.avatarPayload = obj.value("avatar").toString();
         contact.online = false;
+        contact.lanOnline = false;
+        contact.signalOnline = false;
+        contact.presence = PresenceKind::Offline;
+        contact.signalMode.clear();
+        contact.signalServer.clear();
         contact.unread = obj.value("unread").toInt(0);
         contact.lastSeenMs = static_cast<qint64>(obj.value("last_seen").toDouble());
         loadHistory(contact);
@@ -1935,6 +2320,19 @@ void ChatWindow::loadProfile() {
     if (!selfAvatarPath_.isEmpty() && QImage(selfAvatarPath_).isNull()) {
         selfAvatarPath_.clear();
     }
+    QStringList servers;
+    const QJsonValue serversVal = obj.value("signaling_servers");
+    if (serversVal.isArray()) {
+        const QJsonArray arr = serversVal.toArray();
+        for (const QJsonValue& v : arr) {
+            if (v.isString()) {
+                servers.push_back(v.toString());
+            }
+        }
+    } else if (serversVal.isString()) {
+        servers = serversVal.toString().split('\n');
+    }
+    signalingServers_ = normalizeSignalServers(servers);
 }
 
 void ChatWindow::saveProfile() const {
@@ -1942,6 +2340,11 @@ void ChatWindow::saveProfile() const {
 
     QJsonObject obj;
     obj.insert("avatar_path", selfAvatarPath_);
+    QJsonArray arr;
+    for (const QString& server : signalingServers_) {
+        arr.push_back(server);
+    }
+    obj.insert("signaling_servers", arr);
 
     QFile file(profileFilePath());
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -2007,6 +2410,117 @@ void ChatWindow::syncLocalAvatarToNetwork() {
     }
 }
 
+QStringList ChatWindow::normalizeSignalServers(const QStringList& rawServers) const {
+    QStringList out;
+    QSet<QString> seen;
+    for (QString item : rawServers) {
+        item = item.trimmed();
+        if (item.isEmpty()) {
+            continue;
+        }
+        if (!item.contains("://")) {
+            item = "https://" + item;
+        }
+        while (item.endsWith('/')) {
+            item.chop(1);
+        }
+        const QUrl url(item);
+        if (!url.isValid() || url.host().isEmpty()) {
+            continue;
+        }
+        const QString normalized = url.toString(QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment | QUrl::RemoveUserInfo);
+        if (normalized.isEmpty() || seen.contains(normalized)) {
+            continue;
+        }
+        seen.insert(normalized);
+        out.push_back(normalized);
+    }
+    return out;
+}
+
+bool ChatWindow::signalRequest(const QString& url,
+                               const QString& method,
+                               const QJsonObject* body,
+                               QJsonDocument* outDoc,
+                               QString* errorText) const {
+    if (signalingNet_ == nullptr) {
+        if (errorText != nullptr) {
+            *errorText = "信令网络未初始化";
+        }
+        return false;
+    }
+
+    QNetworkRequest request{QUrl(url)};
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QNetworkReply* reply = nullptr;
+    const QString methodUpper = method.trimmed().toUpper();
+    if (methodUpper == "POST") {
+        const QByteArray payload = body == nullptr ? QByteArray("{}") : QJsonDocument(*body).toJson(QJsonDocument::Compact);
+        reply = signalingNet_->post(request, payload);
+    } else {
+        reply = signalingNet_->get(request);
+    }
+    if (reply == nullptr) {
+        if (errorText != nullptr) {
+            *errorText = "请求创建失败";
+        }
+        return false;
+    }
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timeout.start(3000);
+    loop.exec();
+
+    if (!reply->isFinished()) {
+        reply->abort();
+        reply->deleteLater();
+        if (errorText != nullptr) {
+            *errorText = "请求超时";
+        }
+        return false;
+    }
+
+    if (reply->error() != QNetworkReply::NoError) {
+        if (errorText != nullptr) {
+            *errorText = reply->errorString();
+        }
+        reply->deleteLater();
+        return false;
+    }
+
+    const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray bytes = reply->readAll();
+    reply->deleteLater();
+    if (statusCode >= 400) {
+        if (errorText != nullptr) {
+            *errorText = QString("HTTP %1").arg(statusCode);
+        }
+        return false;
+    }
+
+    if (outDoc != nullptr) {
+        if (bytes.trimmed().isEmpty()) {
+            *outDoc = QJsonDocument(QJsonObject{});
+        } else {
+            QJsonParseError parseError;
+            const QJsonDocument doc = QJsonDocument::fromJson(bytes, &parseError);
+            if (parseError.error != QJsonParseError::NoError) {
+                if (errorText != nullptr) {
+                    *errorText = "JSON解析失败";
+                }
+                return false;
+            }
+            *outDoc = doc;
+        }
+    }
+    return true;
+}
+
 void ChatWindow::applySelfAvatar() {
     const Config config = app_.configCopy();
     const QString seed = QString::fromStdString(config.userName + config.userId);
@@ -2047,6 +2561,20 @@ QString ChatWindow::displayName(const Contact& contact) const {
         return contact.name.trimmed();
     }
     return contact.userId;
+}
+
+QString ChatWindow::presenceText(PresenceKind kind) const {
+    switch (kind) {
+        case PresenceKind::Lan:
+            return "局域网在线";
+        case PresenceKind::SignalP2P:
+            return "打洞在线";
+        case PresenceKind::SignalWs:
+            return "WS兜底在线";
+        case PresenceKind::Offline:
+        default:
+            return "离线";
+    }
 }
 
 uint64_t ChatWindow::storageSeed() const {

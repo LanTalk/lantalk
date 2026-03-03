@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LanTalk Web</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail">
+      <div class="avatar-wrap">
+        <img id="selfAvatar" class="avatar-lg" alt="self" />
+      </div>
+      <button id="openSettingsBtn" class="icon-btn" title="设置">⚙</button>
+    </aside>
+
+    <section class="sessions">
+      <div class="search-wrap">
+        <input id="searchInput" placeholder="搜索联系人" />
+      </div>
+      <div id="contactList" class="contact-list"></div>
+    </section>
+
+    <main class="chat">
+      <header class="chat-header">
+        <div id="chatTitle" class="chat-title">聊天窗口</div>
+        <button id="profileBtn" class="dots-btn" title="查看资料">•••</button>
+      </header>
+
+      <section id="messages" class="messages"></section>
+
+      <section class="composer">
+        <div class="tool-row">
+          <button id="emojiBtn" class="tool-btn" title="表情">☺</button>
+        </div>
+        <div class="input-row">
+          <textarea id="inputBox" placeholder="输入消息（Enter发送，Shift+Enter换行）"></textarea>
+          <button id="sendBtn" class="send-btn">发送</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="settingsDialog" class="settings-dialog">
+    <h3>个人设置</h3>
+    <label>昵称 <input id="nameInput" /></label>
+    <label>用户ID <input id="idInput" disabled /></label>
+    <label>信令服务器（每行一个）
+      <textarea id="serversInput" rows="4" placeholder="https://lantalk-signal.example.workers.dev"></textarea>
+    </label>
+    <p class="hint">网页版不支持发送文件，仅支持文本与表情。</p>
+    <div class="dialog-actions">
+      <button id="cancelSettingsBtn">取消</button>
+      <button id="saveSettingsBtn" class="primary">保存</button>
+    </div>
+  </dialog>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
