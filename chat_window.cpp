@@ -12,6 +12,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
@@ -83,6 +84,40 @@ QString injectSoftWrapHints(const QString& value, int chunkLen = 20) {
         }
     }
     return out;
+}
+
+QString wrapTextByPixelWidth(const QString& value, const QFontMetrics& metrics, int maxWidthPx) {
+    if (value.isEmpty() || maxWidthPx <= 0) {
+        return value;
+    }
+
+    QStringList lines;
+    const QStringList paragraphs = value.split('\n', Qt::KeepEmptyParts);
+    for (const QString& paragraph : paragraphs) {
+        if (paragraph.isEmpty()) {
+            lines.push_back(QString());
+            continue;
+        }
+
+        QString line;
+        int lineWidth = 0;
+        for (const QChar ch : paragraph) {
+            const int chWidth = std::max(1, metrics.horizontalAdvance(ch));
+            if (!line.isEmpty() && lineWidth + chWidth > maxWidthPx) {
+                lines.push_back(line);
+                line.clear();
+                lineWidth = 0;
+                if (ch.isSpace()) {
+                    continue;
+                }
+            }
+
+            line.push_back(ch);
+            lineWidth += chWidth;
+        }
+        lines.push_back(line);
+    }
+    return lines.join('\n');
 }
 
 qint64 nowMs() {
@@ -840,6 +875,7 @@ void ChatWindow::setupUi() {
             background: #07c160;
             color: #ffffff;
             font-weight: 700;
+            font-size: 11px;
             padding: 0 14px;
         }
         QPushButton#PrimaryBtn:hover { background: #06b35a; }
@@ -1514,6 +1550,8 @@ void ChatWindow::renderCurrentConversation() {
                               ? conversationView_->viewport()->width()
                               : width();
     const int bubbleMaxWidth = std::max(180, ((std::max(420, viewWidth) - 112) * 2) / 3);
+    const int bubbleContentMaxWidth = std::max(150, bubbleMaxWidth - 22);
+    const QFontMetrics bubbleMetrics(conversationView_->font());
 
     QString html;
     html += QString(
@@ -1531,14 +1569,15 @@ void ChatWindow::renderCurrentConversation() {
             if (fileLabel.isEmpty()) {
                 fileLabel = QFileInfo(message.filePath).fileName();
             }
-            fileLabel = injectSoftWrapHints(fileLabel, 16);
+            fileLabel = wrapTextByPixelWidth(fileLabel, bubbleMetrics, bubbleContentMaxWidth);
             const QString link = QUrl::fromLocalFile(message.filePath).toString();
             QString labelHtml = htmlEscape(fileLabel);
-            labelHtml.replace(QString(QChar(0x200B)), "&#8203;");
+            labelHtml.replace("\n", "<br/>");
             content = QString("<a style='color:#1d4ed8;text-decoration:none;word-break:break-all;' href='%1'>文件：%2</a>")
                           .arg(link, labelHtml);
         } else {
-            QString wrappedText = injectSoftWrapHints(message.text, 16);
+            QString wrappedText = wrapTextByPixelWidth(message.text, bubbleMetrics, bubbleContentMaxWidth);
+            wrappedText = injectSoftWrapHints(wrappedText, 48);
             content = htmlEscape(wrappedText);
             content.replace(QString(QChar(0x200B)), "&#8203;");
             content.replace("\n", "<br/>");
@@ -1546,33 +1585,61 @@ void ChatWindow::renderCurrentConversation() {
 
         const QString senderTime = QString("%1  %2").arg(htmlEscape(sender), timeText(message.timestampMs));
         const QString bubble = QString(
-                                   "<div style='display:inline-block;max-width:%1px;background:%2;border:1px solid %3;"
-                                   "border-radius:12px;padding:8px 10px;color:#0f172a;line-height:1.58;"
-                                   "white-space:pre-wrap;word-wrap:break-word;word-break:break-all;text-align:left;'>%4</div>")
+                                   "<table cellspacing='0' cellpadding='0'>"
+                                   "<tr>"
+                                   "<td style='background:%2;border:1px solid %3;border-radius:12px;padding:8px 10px;"
+                                   "color:#0f172a;line-height:1.58;text-align:left;'>"
+                                   "<div style='max-width:%1px;white-space:pre-wrap;word-wrap:break-word;"
+                                   "word-break:break-all;text-align:left;'>%4</div>"
+                                   "</td>"
+                                   "</tr>"
+                                   "</table>")
                                    .arg(bubbleMaxWidth)
                                    .arg(bubbleBg, bubbleBorder, content);
 
         if (message.incoming) {
             html += QString(
-                        "<div style='width:100%%;margin:8px 0;'>"
-                        "<div style='margin-left:44px;font-size:11px;color:#8b95a7;text-align:left;'>%1</div>"
-                        "<div style='margin-top:2px;text-align:left;'>"
-                        "<img src='%2' width='34' height='34' style='border-radius:8px;vertical-align:top;'/>"
-                        "<div style='display:inline-block;vertical-align:top;margin-left:8px;'>%3</div>"
-                        "</div>"
-                        "</div>")
+                        "<table width='100%%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
+                        "<tr>"
+                        "<td style='padding:0 0 3px 42px;font-size:11px;color:#8b95a7;text-align:left;'>%1</td>"
+                        "</tr>"
+                        "<tr>"
+                        "<td align='left'>"
+                        "<table cellspacing='0' cellpadding='0'>"
+                        "<tr>"
+                        "<td width='34' valign='top' style='vertical-align:top;'>"
+                        "<img src='%2' width='34' height='34' style='border-radius:8px;display:block;'/>"
+                        "</td>"
+                        "<td width='8'></td>"
+                        "<td valign='top' style='vertical-align:top;'>%3</td>"
+                        "</tr>"
+                        "</table>"
+                        "</td>"
+                        "</tr>"
+                        "</table>")
                         .arg(senderTime)
                         .arg(avatarUrl)
                         .arg(bubble);
         } else {
             html += QString(
-                        "<div style='width:100%%;margin:8px 0;'>"
-                        "<div style='margin-right:44px;font-size:11px;color:#8b95a7;text-align:right;'>%1</div>"
-                        "<div style='margin-top:2px;text-align:right;'>"
-                        "<div style='display:inline-block;vertical-align:top;margin-right:8px;'>%2</div>"
-                        "<img src='%3' width='34' height='34' style='border-radius:8px;vertical-align:top;'/>"
-                        "</div>"
-                        "</div>")
+                        "<table width='100%%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
+                        "<tr>"
+                        "<td style='padding:0 42px 3px 0;font-size:11px;color:#8b95a7;text-align:right;'>%1</td>"
+                        "</tr>"
+                        "<tr>"
+                        "<td align='right'>"
+                        "<table cellspacing='0' cellpadding='0'>"
+                        "<tr>"
+                        "<td valign='top' style='vertical-align:top;'>%2</td>"
+                        "<td width='8'></td>"
+                        "<td width='34' valign='top' style='vertical-align:top;'>"
+                        "<img src='%3' width='34' height='34' style='border-radius:8px;display:block;'/>"
+                        "</td>"
+                        "</tr>"
+                        "</table>"
+                        "</td>"
+                        "</tr>"
+                        "</table>")
                         .arg(senderTime)
                         .arg(bubble)
                         .arg(avatarUrl);
