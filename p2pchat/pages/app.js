@@ -1,10 +1,3 @@
-const state = {
-  config: loadConfig(),
-  contacts: new Map(),
-  activeId: "",
-  pullAfter: new Map(),
-};
-
 const selfAvatar = document.getElementById("selfAvatar");
 const contactList = document.getElementById("contactList");
 const chatTitle = document.getElementById("chatTitle");
@@ -29,6 +22,13 @@ const CLASSIC_NAMES = [
 ];
 const DEFAULT_SIGNAL_SERVER = "https://lantalk-web.pages.dev";
 const AVATAR_POOL = Array.from({ length: 104 }, (_, i) => `/avatars/default_${String(i + 1).padStart(3, "0")}.png`);
+
+const state = {
+  config: loadConfig(),
+  contacts: new Map(),
+  activeId: "",
+  pullAfter: new Map(),
+};
 
 function loadConfig() {
   const raw = localStorage.getItem("lantalk_web_config");
