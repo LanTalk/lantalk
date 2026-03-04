@@ -385,6 +385,7 @@ async function refreshPresence() {
         listenPort: 39001,
         e2eePublic: "0",
         localIps: [],
+        p2pPeers: [],
       });
 
       const peersData = await requestJson(

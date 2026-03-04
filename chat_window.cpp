@@ -215,6 +215,7 @@ QIcon makeAppIcon() {
 
 constexpr char kBlobMagic[] = "LTC2";
 constexpr char kDefaultSignalServer[] = "https://lantalk-web.pages.dev";
+constexpr qint64 kSignalP2PVerifyTtlMs = 45 * 1000;
 
 QByteArray nonceToBytes(uint64_t nonce) {
     QByteArray out;
@@ -1126,6 +1127,8 @@ void ChatWindow::onSendMessage() {
             return;
         }
         appendSignalOutgoingMessage(*contact, text, now);
+    } else {
+        noteVerifiedSignalP2P(userId);
     }
 
     inputEdit_->clear();
@@ -1163,6 +1166,8 @@ void ChatWindow::onSendFile() {
             return;
         }
         QMessageBox::warning(this, "发送失败", QString::fromStdString(error.empty() ? "文件发送失败。" : error));
+    } else {
+        noteVerifiedSignalP2P(userId);
     }
 }
 
@@ -1523,7 +1528,7 @@ void ChatWindow::refreshOnlinePeers() {
     }
 
     for (auto& contact : contacts_) {
-        const bool shouldOnline = onlineIds.contains(contact.userId);
+        const bool shouldOnline = onlineIds.contains(contact.userId) && !signalKnownUsers_.contains(contact.userId);
         if (contact.lanOnline != shouldOnline) {
             contact.lanOnline = shouldOnline;
             changed = true;
@@ -1543,6 +1548,7 @@ void ChatWindow::refreshOnlinePeers() {
             changed = true;
         }
         Contact& contact = *contactPtr;
+        const bool signalKnown = signalKnownUsers_.contains(userId);
 
         const QString newName = QString::fromStdString(peer.name).trimmed();
         const QString newIp = QString::fromStdString(peer.ip).trimmed();
@@ -1560,8 +1566,11 @@ void ChatWindow::refreshOnlinePeers() {
             contact.avatarPayload = newAvatarPayload;
             changed = true;
         }
-        if (!contact.lanOnline) {
+        if (!signalKnown && !contact.lanOnline) {
             contact.lanOnline = true;
+            changed = true;
+        } else if (signalKnown && contact.lanOnline) {
+            contact.lanOnline = false;
             changed = true;
         }
         contact.lastSeenMs = now;
@@ -1596,8 +1605,18 @@ void ChatWindow::refreshSignalingPeers() {
         return;
     }
 
+    const qint64 now = nowMs();
+    for (auto it = verifiedSignalP2PAtMsByUserId_.begin(); it != verifiedSignalP2PAtMsByUserId_.end();) {
+        if (now - it.value() > kSignalP2PVerifyTtlMs) {
+            it = verifiedSignalP2PAtMsByUserId_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     QSet<QString> p2pUsers;
     QSet<QString> wsUsers;
+    QSet<QString> signalKnownUsers;
     QHash<QString, QString> serverByUserId;
     bool changed = false;
 
@@ -1618,6 +1637,7 @@ void ChatWindow::refreshSignalingPeers() {
             presenceReq.insert("listenPort", static_cast<int>(cfg.listenPort));
             presenceReq.insert("e2eePublic", QString::number(cfg.e2eePublic));
             presenceReq.insert("localIps", localIps);
+            presenceReq.insert("p2pPeers", buildVerifiedSignalP2PPeers(now));
             QJsonDocument ignored;
             QString ignoredErr;
             signalRequest(signalApiUrl(server, "/v1/presence"), "POST", &presenceReq, &ignored, &ignoredErr);
@@ -1646,8 +1666,9 @@ void ChatWindow::refreshSignalingPeers() {
                     continue;
                 }
 
+                signalKnownUsers.insert(userId);
                 const QString mode = peerObj.value("mode").toString("ws").toLower();
-                const bool isP2P = (mode == "p2p");
+                const bool isP2P = (mode == "p2p") || hasRecentVerifiedSignalP2P(userId, now);
                 if (isP2P) {
                     p2pUsers.insert(userId);
                     wsUsers.remove(userId);
@@ -1679,29 +1700,31 @@ void ChatWindow::refreshSignalingPeers() {
                     contact.avatarPayload = avatar;
                     changed = true;
                 }
-                contact.lastSeenMs = nowMs();
+                contact.lastSeenMs = now;
 
-                if (isP2P) {
-                    bool okPort = false;
-                    const int port = peerObj.value("port").toInt(0);
-                    const uint16_t safePort = (port > 0 && port <= 65535) ? static_cast<uint16_t>(port) : 0;
-                    okPort = (safePort > 0);
-                    bool okKey = false;
-                    const QString pubRaw = peerObj.value("e2eePublic").toVariant().toString();
-                    const uint64_t pubKey = pubRaw.toULongLong(&okKey);
-                    if (okPort && okKey && !ip.isEmpty()) {
-                        app_.upsertSignalPeer(userId.toStdString(),
-                                              contact.name.toStdString(),
-                                              ip.toStdString(),
-                                              safePort,
-                                              pubKey,
-                                              contact.avatarPayload.toStdString());
-                    }
+                bool okPort = false;
+                const int port = peerObj.value("port").toInt(0);
+                const uint16_t safePort = (port > 0 && port <= 65535) ? static_cast<uint16_t>(port) : 0;
+                okPort = (safePort > 0);
+                bool okKey = false;
+                const QString pubRaw = peerObj.value("e2eePublic").toVariant().toString();
+                const uint64_t pubKey = pubRaw.toULongLong(&okKey);
+                if (okPort && okKey && !ip.isEmpty()) {
+                    app_.upsertSignalPeer(userId.toStdString(),
+                                          contact.name.toStdString(),
+                                          ip.toStdString(),
+                                          safePort,
+                                          pubKey,
+                                          contact.avatarPayload.toStdString());
                 }
             }
         }
     }
 
+    if (signalKnownUsers_ != signalKnownUsers) {
+        signalKnownUsers_ = signalKnownUsers;
+        changed = true;
+    }
     if (signalP2PUsers_ != p2pUsers) {
         signalP2PUsers_ = p2pUsers;
         changed = true;
@@ -1782,10 +1805,15 @@ void ChatWindow::pollSignalMessages() {
                 contact.avatarPayload = avatar;
             }
             contact.signalServer = server;
-            contact.signalMode = "ws";
+            contact.signalMode = hasRecentVerifiedSignalP2P(fromId, nowMs()) ? "p2p" : "ws";
             contact.lastSeenMs = nowMs();
-            signalWsUsers_.insert(fromId);
-            signalP2PUsers_.remove(fromId);
+            if (hasRecentVerifiedSignalP2P(fromId, nowMs())) {
+                signalP2PUsers_.insert(fromId);
+                signalWsUsers_.remove(fromId);
+            } else {
+                signalWsUsers_.insert(fromId);
+                signalP2PUsers_.remove(fromId);
+            }
             signalServerByUserId_[fromId] = server;
 
             ChatMessage message;
@@ -1810,6 +1838,38 @@ void ChatWindow::pollSignalMessages() {
         renderCurrentConversation();
         updateChatHeader();
     }
+}
+
+void ChatWindow::noteVerifiedSignalP2P(const QString& userId) {
+    const QString id = userId.trimmed();
+    if (id.isEmpty()) {
+        return;
+    }
+    verifiedSignalP2PAtMsByUserId_[id] = nowMs();
+
+    if (!signalKnownUsers_.contains(id)) {
+        return;
+    }
+    signalP2PUsers_.insert(id);
+    signalWsUsers_.remove(id);
+}
+
+bool ChatWindow::hasRecentVerifiedSignalP2P(const QString& userId, qint64 nowMsValue) const {
+    const auto it = verifiedSignalP2PAtMsByUserId_.find(userId);
+    if (it == verifiedSignalP2PAtMsByUserId_.end()) {
+        return false;
+    }
+    return (nowMsValue - it.value()) <= kSignalP2PVerifyTtlMs;
+}
+
+QJsonArray ChatWindow::buildVerifiedSignalP2PPeers(qint64 nowMsValue) const {
+    QJsonArray out;
+    for (auto it = verifiedSignalP2PAtMsByUserId_.cbegin(); it != verifiedSignalP2PAtMsByUserId_.cend(); ++it) {
+        if ((nowMsValue - it.value()) <= kSignalP2PVerifyTtlMs) {
+            out.push_back(it.key());
+        }
+    }
+    return out;
 }
 
 void ChatWindow::syncSignalPresence(bool* changed) {
@@ -2107,7 +2167,11 @@ void ChatWindow::handleMessageEvent(const MessageEvent& event) {
         contact.ip = peerIp;
     }
     const qint64 now = nowMs();
-    contact.lanOnline = true;
+    const bool signalKnown = signalKnownUsers_.contains(userId);
+    contact.lanOnline = !signalKnown;
+    if (signalKnown) {
+        noteVerifiedSignalP2P(userId);
+    }
     contact.lastSeenMs = now;
     bool presenceChanged = false;
     syncSignalPresence(&presenceChanged);

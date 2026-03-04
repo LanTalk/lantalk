@@ -6,6 +6,7 @@
 #include <QMainWindow>
 #include <QByteArray>
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
@@ -92,6 +93,9 @@ private:
     void refreshSignalingPeers();
     void pollSignalMessages();
     void syncSignalPresence(bool* changed);
+    void noteVerifiedSignalP2P(const QString& userId);
+    bool hasRecentVerifiedSignalP2P(const QString& userId, qint64 nowMsValue) const;
+    QJsonArray buildVerifiedSignalP2PPeers(qint64 nowMsValue) const;
     void appendSignalOutgoingMessage(Contact& contact, const QString& text, qint64 timestampMs);
     void rebuildContactList();
     void renderCurrentConversation();
@@ -171,6 +175,8 @@ private:
     QTimer* signalingTimer_ = nullptr;
     QHash<QString, qint64> signalAfterByServer_;
     QHash<QString, QString> signalServerByUserId_;
+    QHash<QString, qint64> verifiedSignalP2PAtMsByUserId_;
+    QSet<QString> signalKnownUsers_;
     QSet<QString> signalP2PUsers_;
     QSet<QString> signalWsUsers_;
     QSet<QString> seenSignalMsgIds_;

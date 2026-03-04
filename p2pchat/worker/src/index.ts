@@ -10,6 +10,7 @@ type PresenceRecord = {
   listenPort: number;
   e2eePublic: string;
   localIps: string[];
+  p2pPeers: string[];
   lastSeenMs: number;
 };
 
@@ -53,11 +54,8 @@ function parseTsFromMessageKey(key: string): number {
 
 function decideMode(selfPeer: PresenceRecord | undefined, otherPeer: PresenceRecord): "p2p" | "ws" {
   if (!selfPeer) return "ws";
-  if (selfPeer.ip && otherPeer.ip && selfPeer.ip === otherPeer.ip) return "p2p";
-  const selfLocal = new Set(selfPeer.localIps || []);
-  for (const ip of otherPeer.localIps || []) {
-    if (selfLocal.has(ip)) return "p2p";
-  }
+  const verified = new Set((selfPeer.p2pPeers || []).map((v) => String(v || "").trim()).filter((v) => v.length > 0));
+  if (verified.has(otherPeer.userId)) return "p2p";
   return "ws";
 }
 
@@ -150,6 +148,12 @@ export class SignalHub {
     const localIps = Array.isArray(body.localIps)
       ? body.localIps.map((v) => String(v)).filter((v) => v.length > 0).slice(0, 16)
       : [];
+    const p2pPeers = Array.isArray(body.p2pPeers)
+      ? body.p2pPeers
+          .map((v) => String(v || "").trim())
+          .filter((v) => v.length > 0 && v.length <= 128)
+          .slice(0, 256)
+      : [];
 
     const peer: PresenceRecord = {
       userId,
@@ -159,6 +163,7 @@ export class SignalHub {
       listenPort: Number.isFinite(listenPort) ? listenPort : 0,
       e2eePublic,
       localIps,
+      p2pPeers,
       lastSeenMs: Date.now(),
     };
 
