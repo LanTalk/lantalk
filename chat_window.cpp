@@ -214,6 +214,7 @@ QIcon makeAppIcon() {
 }
 
 constexpr char kBlobMagic[] = "LTC2";
+constexpr char kDefaultSignalServer[] = "https://lantalk-web.pages.dev";
 
 QByteArray nonceToBytes(uint64_t nonce) {
     QByteArray out;
@@ -319,6 +320,10 @@ ChatWindow::ChatWindow() {
 
     ensureDefaultAvatarLibrary();
     loadProfile();
+    if (signalingServers_.isEmpty()) {
+        signalingServers_ = QStringList{QString::fromUtf8(kDefaultSignalServer)};
+        saveProfile();
+    }
     if (selfAvatarPath_.isEmpty() || QImage(selfAvatarPath_).isNull()) {
         if (!defaultAvatarPaths_.isEmpty()) {
             const int pick = QRandomGenerator::global()->bounded(defaultAvatarPaths_.size());
@@ -1082,7 +1087,7 @@ void ChatWindow::onSendMessage() {
 
         const Config cfg = app_.configCopy();
         const qint64 now = nowMs();
-        const QString postUrl = contact->signalServer + "/v1/messages/send";
+        const QString postUrl = signalApiUrl(contact->signalServer, "/v1/messages/send");
         QJsonObject req;
         req.insert("fromUserId", QString::fromStdString(cfg.userId));
         req.insert("fromName", QString::fromStdString(cfg.userName));
@@ -1265,6 +1270,14 @@ void ChatWindow::openSettingsDialog() {
             font-size: 14px;
             padding: 0 8px;
         }
+        QTextEdit {
+            min-height: 86px;
+            font-size: 13px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            padding: 6px 8px;
+            background: #ffffff;
+        }
         QPushButton {
             min-height: 32px;
             font-size: 14px;
@@ -1309,7 +1322,7 @@ void ChatWindow::openSettingsDialog() {
 
     auto* signalEdit = new QTextEdit(&dialog);
     signalEdit->setAcceptRichText(false);
-    signalEdit->setPlaceholderText("一行一个，例如：\nhttps://lantalk-signal.example.workers.dev");
+    signalEdit->setPlaceholderText("一行一个");
     signalEdit->setMinimumHeight(90);
     signalEdit->setPlainText(signalingServers_.join("\n"));
     form->addRow("信令服务器", signalEdit);
@@ -1585,9 +1598,9 @@ void ChatWindow::refreshSignalingPeers() {
             presenceReq.insert("localIps", localIps);
             QJsonDocument ignored;
             QString ignoredErr;
-            signalRequest(server + "/v1/presence", "POST", &presenceReq, &ignored, &ignoredErr);
+            signalRequest(signalApiUrl(server, "/v1/presence"), "POST", &presenceReq, &ignored, &ignoredErr);
 
-            QUrl peersUrl(server + "/v1/peers");
+            QUrl peersUrl(signalApiUrl(server, "/v1/peers"));
             QUrlQuery query;
             query.addQueryItem("userId", selfId);
             peersUrl.setQuery(query);
@@ -1699,7 +1712,7 @@ void ChatWindow::pollSignalMessages() {
     bool changed = false;
     for (const QString& server : signalingServers_) {
         const qint64 after = signalAfterByServer_.value(server, 0);
-        QUrl pullUrl(server + "/v1/messages/pull");
+        QUrl pullUrl(signalApiUrl(server, "/v1/messages/pull"));
         QUrlQuery query;
         query.addQueryItem("userId", selfId);
         query.addQueryItem("after", QString::number(after));
@@ -2436,6 +2449,30 @@ QStringList ChatWindow::normalizeSignalServers(const QStringList& rawServers) co
         out.push_back(normalized);
     }
     return out;
+}
+
+QString ChatWindow::signalApiUrl(const QString& serverBase, const QString& path) const {
+    QString base = serverBase.trimmed();
+    QString cleanPath = path.trimmed();
+    if (!cleanPath.startsWith('/')) {
+        cleanPath.prepend('/');
+    }
+    while (base.endsWith('/')) {
+        base.chop(1);
+    }
+    if (base.isEmpty()) {
+        return cleanPath;
+    }
+
+    QUrl baseUrl(base);
+    const QString host = baseUrl.host().toLower();
+    if (host.endsWith(".pages.dev")) {
+        return base + "/api" + cleanPath;
+    }
+    if (base.endsWith("/api")) {
+        return base + cleanPath;
+    }
+    return base + cleanPath;
 }
 
 bool ChatWindow::signalRequest(const QString& url,

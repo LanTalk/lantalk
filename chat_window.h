@@ -126,6 +126,7 @@ private:
                        const QJsonObject* body,
                        QJsonDocument* outDoc,
                        QString* errorText) const;
+    QString signalApiUrl(const QString& serverBase, const QString& path) const;
     void applySelfAvatar();
     QString localIpSummary() const;
     QString displayName(const Contact& contact) const;

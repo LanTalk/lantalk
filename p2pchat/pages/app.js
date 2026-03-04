@@ -21,20 +21,37 @@ const nameInput = document.getElementById("nameInput");
 const idInput = document.getElementById("idInput");
 const serversInput = document.getElementById("serversInput");
 
+const CLASSIC_NAMES = [
+  "贾宝玉", "林黛玉", "薛宝钗", "王熙凤",
+  "孙悟空", "唐三藏", "猪八戒", "沙悟净",
+  "宋江", "武松", "林冲", "鲁智深",
+  "诸葛亮", "刘备", "关羽", "张飞", "赵云", "周瑜",
+];
+const DEFAULT_SIGNAL_SERVER = "https://lantalk-web.pages.dev";
+const AVATAR_POOL = Array.from({ length: 104 }, (_, i) => `/avatars/default_${String(i + 1).padStart(3, "0")}.png`);
+
 function loadConfig() {
   const raw = localStorage.getItem("lantalk_web_config");
   if (raw) {
     try {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      parsed.userId = String(parsed.userId || "").trim() || crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      parsed.name = String(parsed.name || "").trim() || randomClassicName();
+      parsed.avatar = String(parsed.avatar || "").trim() || randomAvatar();
+      parsed.servers = normalizeServers(parsed.servers || [DEFAULT_SIGNAL_SERVER]);
+      if (!parsed.servers.length) {
+        parsed.servers = [DEFAULT_SIGNAL_SERVER];
+      }
+      return parsed;
     } catch {
       // ignore
     }
   }
   return {
     userId: crypto.randomUUID().replace(/-/g, "").slice(0, 16),
-    name: `Web用户${Math.floor(Math.random() * 9000 + 1000)}`,
+    name: randomClassicName(),
     avatar: randomAvatar(),
-    servers: ["https://lantalk-signal.lantalkchat9956.workers.dev"],
+    servers: [DEFAULT_SIGNAL_SERVER],
   };
 }
 
@@ -43,38 +60,12 @@ function saveConfig() {
 }
 
 function randomAvatar() {
-  const hue = Math.floor(Math.random() * 360);
-  const canvas = document.createElement("canvas");
-  canvas.width = 80;
-  canvas.height = 80;
-  const ctx = canvas.getContext("2d");
-  const grad = ctx.createLinearGradient(0, 0, 80, 80);
-  grad.addColorStop(0, `hsl(${hue},70%,62%)`);
-  grad.addColorStop(1, `hsl(${(hue + 30) % 360},66%,52%)`);
-  ctx.fillStyle = grad;
-  roundRect(ctx, 0, 0, 80, 80, 18);
-  ctx.fill();
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
-  ctx.beginPath();
-  ctx.arc(40, 30, 12, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.roundRect?.(16, 46, 48, 24, 12);
-  if (!ctx.roundRect) {
-    roundRect(ctx, 16, 46, 48, 24, 12);
-  }
-  ctx.fill();
-  return canvas.toDataURL("image/png");
+  const idx = Math.floor(Math.random() * AVATAR_POOL.length);
+  return AVATAR_POOL[idx];
 }
 
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+function randomClassicName() {
+  return CLASSIC_NAMES[Math.floor(Math.random() * CLASSIC_NAMES.length)];
 }
 
 function normalizeServers(lines) {
@@ -99,11 +90,36 @@ function normalizeServers(lines) {
   return out;
 }
 
+function apiUrl(serverBase, path) {
+  let base = String(serverBase || "").trim().replace(/\/+$/, "");
+  if (!base) base = DEFAULT_SIGNAL_SERVER;
+  let cleanPath = String(path || "");
+  if (!cleanPath.startsWith("/")) cleanPath = `/${cleanPath}`;
+
+  try {
+    const u = new URL(base);
+    if (u.pathname && u.pathname !== "/") {
+      base = `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+    } else {
+      base = `${u.protocol}//${u.host}`;
+    }
+    if (base.endsWith("/api")) {
+      return `${base}${cleanPath}`;
+    }
+    if (u.host.endsWith(".pages.dev")) {
+      return `${base}/api${cleanPath}`;
+    }
+    return `${base}${cleanPath}`;
+  } catch {
+    return `${DEFAULT_SIGNAL_SERVER}/api${cleanPath}`;
+  }
+}
+
 function ensureContact(userId) {
   if (!state.contacts.has(userId)) {
     state.contacts.set(userId, {
       userId,
-      name: userId,
+      name: randomClassicName(),
       avatar: randomAvatar(),
       status: "gray",
       modeText: "离线",
@@ -133,7 +149,6 @@ function renderContacts() {
       <img class="avatar-sm" src="${c.avatar}" alt="avatar" />
       <div class="name-wrap">
         <div class="name-line"><span>${escapeHtml(c.name)}</span><span class="dot ${c.status}"></span></div>
-        <div class="meta-line">${escapeHtml(c.modeText)}</div>
       </div>
     `;
     el.onclick = () => {
@@ -216,7 +231,7 @@ async function refreshPresence() {
 
   for (const server of servers) {
     try {
-      await requestJson(`${server}/v1/presence`, "POST", {
+      await requestJson(apiUrl(server, "/v1/presence"), "POST", {
         userId: state.config.userId,
         name: state.config.name,
         avatarPayload: state.config.avatar,
@@ -225,7 +240,9 @@ async function refreshPresence() {
         localIps: [],
       });
 
-      const peersData = await requestJson(`${server}/v1/peers?userId=${encodeURIComponent(state.config.userId)}`);
+      const peersData = await requestJson(
+        `${apiUrl(server, "/v1/peers")}?userId=${encodeURIComponent(state.config.userId)}`
+      );
       for (const peer of peersData.peers || []) {
         const userId = String(peer.userId || "").trim();
         if (!userId || userId === state.config.userId) continue;
@@ -273,7 +290,7 @@ async function pullMessages() {
     const after = state.pullAfter.get(server) || 0;
     try {
       const data = await requestJson(
-        `${server}/v1/messages/pull?userId=${encodeURIComponent(state.config.userId)}&after=${after}`
+        `${apiUrl(server, "/v1/messages/pull")}?userId=${encodeURIComponent(state.config.userId)}&after=${after}`
       );
       let maxAfter = after;
       for (const msg of data.messages || []) {
@@ -306,7 +323,7 @@ async function sendMessage() {
     return;
   }
 
-  await requestJson(`${contact.server}/v1/messages/send`, "POST", {
+  await requestJson(apiUrl(contact.server, "/v1/messages/send"), "POST", {
     fromUserId: state.config.userId,
     fromName: state.config.name,
     fromAvatar: state.config.avatar,
