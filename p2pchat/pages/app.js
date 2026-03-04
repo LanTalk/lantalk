@@ -28,6 +28,7 @@ const state = {
   contacts: new Map(),
   activeId: "",
   pullAfter: new Map(),
+  selfAvatarPayload: "",
 };
 
 function loadConfig() {
@@ -66,6 +67,71 @@ function randomAvatar() {
 
 function randomClassicName() {
   return CLASSIC_NAMES[Math.floor(Math.random() * CLASSIC_NAMES.length)];
+}
+
+function isLikelyBase64Payload(text) {
+  if (!text || text.length < 64) return false;
+  return /^[A-Za-z0-9+/=]+$/.test(text);
+}
+
+function avatarPayloadToSrc(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return randomAvatar();
+  if (raw.startsWith("data:image/")) return raw;
+  if (raw.startsWith("/") || raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+  if (isLikelyBase64Payload(raw)) return `data:image/jpeg;base64,${raw}`;
+  return randomAvatar();
+}
+
+async function buildAvatarPayloadFromSrc(src) {
+  const image = await new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("avatar_load_failed"));
+    img.src = src;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = 56;
+  canvas.height = 56;
+  const ctx = canvas.getContext("2d");
+  const srcSize = Math.min(image.naturalWidth || image.width, image.naturalHeight || image.height);
+  const sx = Math.max(0, ((image.naturalWidth || image.width) - srcSize) / 2);
+  const sy = Math.max(0, ((image.naturalHeight || image.height) - srcSize) / 2);
+  ctx.drawImage(image, sx, sy, srcSize, srcSize, 0, 0, 56, 56);
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.68);
+  const comma = dataUrl.indexOf(",");
+  return comma > 0 ? dataUrl.slice(comma + 1) : "";
+}
+
+async function ensureSelfAvatarPayload() {
+  if (state.selfAvatarPayload) return state.selfAvatarPayload;
+  let avatar = String(state.config.avatar || "").trim();
+  if (!avatar) {
+    avatar = randomAvatar();
+    state.config.avatar = avatar;
+    saveConfig();
+  }
+
+  if (avatar.startsWith("data:image/")) {
+    const comma = avatar.indexOf(",");
+    state.selfAvatarPayload = comma > 0 ? avatar.slice(comma + 1) : "";
+    return state.selfAvatarPayload;
+  }
+  if (isLikelyBase64Payload(avatar)) {
+    state.selfAvatarPayload = avatar;
+    return state.selfAvatarPayload;
+  }
+
+  try {
+    state.selfAvatarPayload = await buildAvatarPayloadFromSrc(avatar);
+    return state.selfAvatarPayload;
+  } catch {
+    state.config.avatar = randomAvatar();
+    saveConfig();
+    selfAvatar.src = avatarPayloadToSrc(state.config.avatar);
+    state.selfAvatarPayload = await buildAvatarPayloadFromSrc(state.config.avatar);
+    return state.selfAvatarPayload;
+  }
 }
 
 function normalizeServers(lines) {
@@ -121,6 +187,7 @@ function ensureContact(userId) {
       userId,
       name: randomClassicName(),
       avatar: randomAvatar(),
+      avatarPayload: "",
       status: "gray",
       modeText: "离线",
       server: "",
@@ -184,7 +251,7 @@ function renderConversation() {
       <div class="msg-content ${m.incoming ? "in" : "out"}">
         ${m.incoming ? `<img class="avatar-sm" src="${c.avatar}" alt="avatar" />` : ""}
         <div class="bubble ${m.incoming ? "in" : "out"}">${escapeHtml(m.text)}</div>
-        ${!m.incoming ? `<img class="avatar-sm" src="${state.config.avatar}" alt="avatar" />` : ""}
+        ${!m.incoming ? `<img class="avatar-sm" src="${avatarPayloadToSrc(state.config.avatar)}" alt="avatar" />` : ""}
       </div>
     `;
     messages.appendChild(row);
@@ -213,6 +280,7 @@ async function requestJson(url, method = "GET", body = null) {
 }
 
 async function refreshPresence() {
+  const selfPayload = await ensureSelfAvatarPayload();
   const servers = state.config.servers;
   if (!servers.length) {
     for (const c of state.contacts.values()) {
@@ -234,7 +302,7 @@ async function refreshPresence() {
       await requestJson(apiUrl(server, "/v1/presence"), "POST", {
         userId: state.config.userId,
         name: state.config.name,
-        avatarPayload: state.config.avatar,
+        avatarPayload: selfPayload,
         listenPort: 39001,
         e2eePublic: "0",
         localIps: [],
@@ -248,7 +316,11 @@ async function refreshPresence() {
         if (!userId || userId === state.config.userId) continue;
         const c = ensureContact(userId);
         c.name = String(peer.name || userId);
-        c.avatar = String(peer.avatarPayload || randomAvatar());
+        const peerAvatarPayload = String(peer.avatarPayload || "").trim();
+        if (peerAvatarPayload) {
+          c.avatarPayload = peerAvatarPayload;
+          c.avatar = avatarPayloadToSrc(peerAvatarPayload);
+        }
         c.lastSeenMs = now;
 
         const mode = String(peer.mode || "ws");
@@ -269,11 +341,11 @@ async function refreshPresence() {
   for (const c of state.contacts.values()) {
     if (p2p.has(c.userId)) {
       c.status = "blue";
-      c.modeText = "打洞在线";
+      c.modeText = "P2P在线";
       c.server = byServer.get(c.userId) || "";
     } else if (ws.has(c.userId)) {
       c.status = "orange";
-      c.modeText = "WS兜底在线";
+      c.modeText = "WS在线";
       c.server = byServer.get(c.userId) || "";
     } else {
       c.status = "gray";
@@ -300,7 +372,11 @@ async function pullMessages() {
         if (!fromUserId || !text) continue;
         const c = ensureContact(fromUserId);
         c.name = String(msg.fromName || fromUserId);
-        c.avatar = String(msg.fromAvatar || c.avatar);
+        const fromAvatarPayload = String(msg.fromAvatar || "").trim();
+        if (fromAvatarPayload) {
+          c.avatarPayload = fromAvatarPayload;
+          c.avatar = avatarPayloadToSrc(fromAvatarPayload);
+        }
         c.messages.push({ incoming: true, text, timestampMs: ts });
         c.lastSeenMs = Date.now();
         if (ts > maxAfter) maxAfter = ts;
@@ -323,10 +399,11 @@ async function sendMessage() {
     return;
   }
 
+  const selfPayload = await ensureSelfAvatarPayload();
   await requestJson(apiUrl(contact.server, "/v1/messages/send"), "POST", {
     fromUserId: state.config.userId,
     fromName: state.config.name,
-    fromAvatar: state.config.avatar,
+    fromAvatar: selfPayload,
     toUserId: contact.userId,
     text,
     timestampMs: Date.now(),
@@ -363,10 +440,12 @@ inputBox.addEventListener("keydown", (e) => {
 });
 searchInput.addEventListener("input", renderContacts);
 
-selfAvatar.src = state.config.avatar;
+selfAvatar.src = avatarPayloadToSrc(state.config.avatar);
 renderContacts();
 renderConversation();
-refreshPresence();
+ensureSelfAvatarPayload().then(() => {
+  refreshPresence();
+});
 pullMessages();
 setInterval(refreshPresence, 3000);
 setInterval(pullMessages, 1200);

@@ -248,7 +248,29 @@ QStringList builtInAvatarPaths() {
 }
 
 QImage decodeAvatarPayload(const QString& payload) {
-    const QByteArray packed = QByteArray::fromBase64(payload.toLatin1());
+    QString raw = payload.trimmed();
+    if (raw.isEmpty()) {
+        return {};
+    }
+
+    if (raw.startsWith(":/")) {
+        QImage image(raw);
+        return image;
+    }
+    if (raw.startsWith("/avatars/")) {
+        QImage image(":" + raw);
+        if (!image.isNull()) {
+            return image;
+        }
+    }
+    if (raw.startsWith("data:image/")) {
+        const int comma = raw.indexOf(',');
+        if (comma > 0) {
+            raw = raw.mid(comma + 1).trimmed();
+        }
+    }
+
+    const QByteArray packed = QByteArray::fromBase64(raw.toLatin1());
     if (packed.isEmpty()) {
         return {};
     }
@@ -2605,9 +2627,9 @@ QString ChatWindow::presenceText(PresenceKind kind) const {
         case PresenceKind::Lan:
             return "局域网在线";
         case PresenceKind::SignalP2P:
-            return "打洞在线";
+            return "P2P在线";
         case PresenceKind::SignalWs:
-            return "WS兜底在线";
+            return "WS在线";
         case PresenceKind::Offline:
         default:
             return "离线";
