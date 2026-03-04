@@ -19,6 +19,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHostAddress>
+#include <QHostInfo>
 #include <QIcon>
 #include <QImage>
 #include <QGuiApplication>
@@ -55,6 +56,7 @@
 #include <QToolButton>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QUdpSocket>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QCursor>
@@ -216,6 +218,184 @@ QIcon makeAppIcon() {
 constexpr char kBlobMagic[] = "LTC2";
 constexpr char kDefaultSignalServer[] = "https://lantalk-web.pages.dev";
 constexpr qint64 kSignalP2PVerifyTtlMs = 45 * 1000;
+constexpr qint64 kSignalP2PProbeCooldownMs = 20 * 1000;
+constexpr qint64 kSignalP2PProbeRecordTtlMs = 10 * 60 * 1000;
+constexpr int kSignalP2PProbeTimeoutMs = 450;
+constexpr qint64 kStunRefreshMs = 60 * 1000;
+constexpr int kStunResponseTimeoutMs = 1200;
+
+struct StunServerSpec {
+    const char* host;
+    quint16 port;
+};
+
+constexpr StunServerSpec kDefaultStunServers[] = {
+    {"stun.cloudflare.com", 3478},
+    {"stun.l.google.com", 19302},
+    {"stun1.l.google.com", 19302},
+};
+
+quint16 readBe16(const uchar* p) {
+    return static_cast<quint16>((static_cast<quint16>(p[0]) << 8U) | static_cast<quint16>(p[1]));
+}
+
+quint32 readBe32(const uchar* p) {
+    return (static_cast<quint32>(p[0]) << 24U) |
+           (static_cast<quint32>(p[1]) << 16U) |
+           (static_cast<quint32>(p[2]) << 8U) |
+           static_cast<quint32>(p[3]);
+}
+
+bool resolveStunHostIPv4(const QString& host, QHostAddress* out) {
+    if (out == nullptr) {
+        return false;
+    }
+    QHostAddress direct;
+    if (direct.setAddress(host) && direct.protocol() == QAbstractSocket::IPv4Protocol) {
+        *out = direct;
+        return true;
+    }
+    const QHostInfo info = QHostInfo::fromName(host);
+    for (const QHostAddress& addr : info.addresses()) {
+        if (addr.protocol() == QAbstractSocket::IPv4Protocol) {
+            *out = addr;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool parseStunBindingResponse(const QByteArray& packet,
+                              const QByteArray& txId,
+                              QString* outIp,
+                              quint16* outPort) {
+    constexpr quint16 kBindingSuccess = 0x0101;
+    constexpr quint16 kAttrMappedAddress = 0x0001;
+    constexpr quint16 kAttrXorMappedAddress = 0x0020;
+    constexpr quint32 kMagicCookie = 0x2112A442U;
+
+    if (packet.size() < 20 || txId.size() != 12) {
+        return false;
+    }
+    const auto* bytes = reinterpret_cast<const uchar*>(packet.constData());
+    if (readBe16(bytes) != kBindingSuccess) {
+        return false;
+    }
+    const quint16 messageLen = readBe16(bytes + 2);
+    if (20 + static_cast<int>(messageLen) > packet.size()) {
+        return false;
+    }
+    if (readBe32(bytes + 4) != kMagicCookie) {
+        return false;
+    }
+    if (std::memcmp(bytes + 8, txId.constData(), 12) != 0) {
+        return false;
+    }
+
+    int offset = 20;
+    const int end = 20 + static_cast<int>(messageLen);
+    while (offset + 4 <= end && offset + 4 <= packet.size()) {
+        const quint16 attrType = readBe16(bytes + offset);
+        const quint16 attrLen = readBe16(bytes + offset + 2);
+        offset += 4;
+        if (offset + static_cast<int>(attrLen) > packet.size()) {
+            return false;
+        }
+
+        if ((attrType == kAttrXorMappedAddress || attrType == kAttrMappedAddress) && attrLen >= 8) {
+            const auto* attr = bytes + offset;
+            const quint8 family = attr[1];
+            if (family == 0x01U) {
+                quint16 port = readBe16(attr + 2);
+                quint32 addr = readBe32(attr + 4);
+                if (attrType == kAttrXorMappedAddress) {
+                    port ^= static_cast<quint16>((kMagicCookie >> 16U) & 0xFFFFU);
+                    addr ^= kMagicCookie;
+                }
+                const QString ip = QString("%1.%2.%3.%4")
+                                       .arg((addr >> 24U) & 0xFFU)
+                                       .arg((addr >> 16U) & 0xFFU)
+                                       .arg((addr >> 8U) & 0xFFU)
+                                       .arg(addr & 0xFFU);
+                if (outIp != nullptr) {
+                    *outIp = ip;
+                }
+                if (outPort != nullptr) {
+                    *outPort = port;
+                }
+                return true;
+            }
+        }
+
+        const int paddedLen = (static_cast<int>(attrLen) + 3) & ~3;
+        offset += paddedLen;
+    }
+    return false;
+}
+
+QString discoverStunReflexiveEndpoint(uint16_t preferredLocalPort) {
+    constexpr quint32 kMagicCookie = 0x2112A442U;
+
+    QByteArray req(20, Qt::Uninitialized);
+    req[0] = 0x00;
+    req[1] = 0x01;
+    req[2] = 0x00;
+    req[3] = 0x00;
+    req[4] = static_cast<char>((kMagicCookie >> 24U) & 0xFFU);
+    req[5] = static_cast<char>((kMagicCookie >> 16U) & 0xFFU);
+    req[6] = static_cast<char>((kMagicCookie >> 8U) & 0xFFU);
+    req[7] = static_cast<char>(kMagicCookie & 0xFFU);
+
+    QByteArray txId(12, Qt::Uninitialized);
+    for (int i = 0; i < txId.size(); ++i) {
+        txId[i] = static_cast<char>(QRandomGenerator::global()->bounded(256));
+        req[8 + i] = txId[i];
+    }
+
+    for (const auto& stunServer : kDefaultStunServers) {
+        QHostAddress serverAddr;
+        if (!resolveStunHostIPv4(QString::fromUtf8(stunServer.host), &serverAddr)) {
+            continue;
+        }
+
+        QUdpSocket sock;
+        if (preferredLocalPort > 0) {
+            sock.bind(QHostAddress::AnyIPv4, preferredLocalPort, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint);
+        }
+        if (sock.localPort() == 0) {
+            if (!sock.bind(QHostAddress::AnyIPv4, 0, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint)) {
+                continue;
+            }
+        }
+
+        if (sock.writeDatagram(req, serverAddr, stunServer.port) < 0) {
+            continue;
+        }
+
+        const qint64 deadline = nowMs() + kStunResponseTimeoutMs;
+        while (nowMs() < deadline) {
+            const int waitMs = static_cast<int>(std::max<qint64>(1, deadline - nowMs()));
+            if (!sock.waitForReadyRead(waitMs)) {
+                break;
+            }
+            while (sock.hasPendingDatagrams()) {
+                QByteArray datagram;
+                datagram.resize(static_cast<int>(sock.pendingDatagramSize()));
+                QHostAddress from;
+                quint16 fromPort = 0;
+                if (sock.readDatagram(datagram.data(), datagram.size(), &from, &fromPort) <= 0) {
+                    continue;
+                }
+                QString ip;
+                quint16 port = 0;
+                if (parseStunBindingResponse(datagram, txId, &ip, &port) && !ip.isEmpty() && port > 0) {
+                    return QString("%1:%2").arg(ip).arg(port);
+                }
+            }
+        }
+    }
+    return {};
+}
 
 QByteArray nonceToBytes(uint64_t nonce) {
     QByteArray out;
@@ -1100,35 +1280,58 @@ void ChatWindow::onSendMessage() {
         return;
     }
 
-    std::string error;
-    if (!app_.sendTextToUserId(userId.toStdString(), text.toStdString(), &error)) {
-        Contact* contact = findContact(userId);
-        if (contact == nullptr || contact->signalServer.isEmpty() || contact->presence == PresenceKind::Offline) {
-            QMessageBox::warning(this, "发送失败", QString::fromStdString(error.empty() ? "消息发送失败。" : error));
-            return;
+    Contact* contact = findContact(userId);
+    const Config cfg = app_.configCopy();
+    const qint64 now = nowMs();
+
+    // For Signal-WS peers, run periodic short-timeout P2P probe first.
+    // If probe fails, immediately fall back to relay to keep UX smooth.
+    if (contact != nullptr && contact->presence == PresenceKind::SignalWs && !contact->signalServer.isEmpty()) {
+        bool shouldProbeP2P = true;
+        const auto probeIt = lastSignalP2PProbeAtMsByUserId_.find(userId);
+        if (probeIt != lastSignalP2PProbeAtMsByUserId_.end() && (now - probeIt.value()) < kSignalP2PProbeCooldownMs) {
+            shouldProbeP2P = false;
         }
 
-        const Config cfg = app_.configCopy();
-        const qint64 now = nowMs();
-        const QString postUrl = signalApiUrl(contact->signalServer, "/v1/messages/send");
-        QJsonObject req;
-        req.insert("fromUserId", QString::fromStdString(cfg.userId));
-        req.insert("fromName", QString::fromStdString(cfg.userName));
-        req.insert("fromAvatar", QString::fromStdString(cfg.avatarPayload));
-        req.insert("toUserId", contact->userId);
-        req.insert("text", text);
-        req.insert("timestampMs", static_cast<double>(now));
+        if (shouldProbeP2P) {
+            lastSignalP2PProbeAtMsByUserId_[userId] = now;
+            std::string probeError;
+            if (app_.sendTextToUserId(userId.toStdString(),
+                                      text.toStdString(),
+                                      &probeError,
+                                      kSignalP2PProbeTimeoutMs)) {
+                noteVerifiedSignalP2P(userId);
+                inputEdit_->clear();
+                return;
+            }
+        }
 
-        QJsonDocument respDoc;
         QString signalErr;
-        if (!signalRequest(postUrl, "POST", &req, &respDoc, &signalErr)) {
-            const QString baseError = QString::fromStdString(error.empty() ? "消息发送失败。" : error);
-            QMessageBox::warning(this, "发送失败", baseError + "\n信令兜底失败：" + signalErr);
+        if (trySendTextViaSignal(*contact, text, cfg, now, &signalErr)) {
+            inputEdit_->clear();
             return;
         }
-        appendSignalOutgoingMessage(*contact, text, now);
-    } else {
+        QMessageBox::warning(this, "发送失败", "信令中继发送失败：" + signalErr);
+        return;
+    }
+
+    std::string error;
+    if (app_.sendTextToUserId(userId.toStdString(), text.toStdString(), &error)) {
         noteVerifiedSignalP2P(userId);
+        inputEdit_->clear();
+        return;
+    }
+
+    if (contact == nullptr) {
+        QMessageBox::warning(this, "发送失败", QString::fromStdString(error.empty() ? "消息发送失败。" : error));
+        return;
+    }
+
+    QString signalErr;
+    if (!trySendTextViaSignal(*contact, text, cfg, now, &signalErr)) {
+        const QString baseError = QString::fromStdString(error.empty() ? "消息发送失败。" : error);
+        QMessageBox::warning(this, "发送失败", baseError + "\n信令兜底失败：" + signalErr);
+        return;
     }
 
     inputEdit_->clear();
@@ -1613,6 +1816,13 @@ void ChatWindow::refreshSignalingPeers() {
             ++it;
         }
     }
+    for (auto it = lastSignalP2PProbeAtMsByUserId_.begin(); it != lastSignalP2PProbeAtMsByUserId_.end();) {
+        if (now - it.value() > kSignalP2PProbeRecordTtlMs) {
+            it = lastSignalP2PProbeAtMsByUserId_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 
     QSet<QString> p2pUsers;
     QSet<QString> wsUsers;
@@ -1621,12 +1831,28 @@ void ChatWindow::refreshSignalingPeers() {
     bool changed = false;
 
     if (!signalingServers_.isEmpty()) {
+        if (cachedStunReflexiveEndpoint_.isEmpty() || (now - cachedStunReflexiveAtMs_) >= kStunRefreshMs) {
+            const QString detected = discoverStunReflexiveEndpoint(cfg.listenPort);
+            cachedStunReflexiveAtMs_ = now;
+            if (!detected.isEmpty()) {
+                cachedStunReflexiveEndpoint_ = detected;
+            }
+        }
+
         QJsonArray localIps;
+        QSet<QString> seenLocalCandidates;
         for (const QHostAddress& addr : QNetworkInterface::allAddresses()) {
             if (addr.protocol() != QAbstractSocket::IPv4Protocol || addr.isLoopback()) {
                 continue;
             }
-            localIps.push_back(addr.toString());
+            const QString candidate = addr.toString();
+            if (!seenLocalCandidates.contains(candidate)) {
+                seenLocalCandidates.insert(candidate);
+                localIps.push_back(candidate);
+            }
+        }
+        if (!cachedStunReflexiveEndpoint_.isEmpty() && !seenLocalCandidates.contains(cachedStunReflexiveEndpoint_)) {
+            localIps.push_back(cachedStunReflexiveEndpoint_);
         }
 
         for (const QString& server : signalingServers_) {
@@ -1929,6 +2155,67 @@ void ChatWindow::syncSignalPresence(bool* changed) {
             contact.lastSeenMs = std::max(contact.lastSeenMs, nowMs());
         }
     }
+}
+
+bool ChatWindow::trySendTextViaSignal(Contact& contact,
+                                      const QString& text,
+                                      const Config& cfg,
+                                      qint64 timestampMs,
+                                      QString* errorText) {
+    QStringList candidates;
+    QSet<QString> seen;
+    auto addCandidate = [&](const QString& raw) {
+        const QString server = raw.trimmed();
+        if (server.isEmpty() || seen.contains(server)) {
+            return;
+        }
+        seen.insert(server);
+        candidates.push_back(server);
+    };
+
+    addCandidate(contact.signalServer);
+    addCandidate(signalServerByUserId_.value(contact.userId));
+    for (const QString& server : signalingServers_) {
+        addCandidate(server);
+    }
+
+    if (candidates.isEmpty()) {
+        if (errorText != nullptr) {
+            *errorText = "未配置可用信令服务器";
+        }
+        return false;
+    }
+
+    QStringList failReasons;
+    for (const QString& server : candidates) {
+        const QString postUrl = signalApiUrl(server, "/v1/messages/send");
+        QJsonObject req;
+        req.insert("fromUserId", QString::fromStdString(cfg.userId));
+        req.insert("fromName", QString::fromStdString(cfg.userName));
+        req.insert("fromAvatar", QString::fromStdString(cfg.avatarPayload));
+        req.insert("toUserId", contact.userId);
+        req.insert("text", text);
+        req.insert("timestampMs", static_cast<double>(timestampMs));
+
+        QJsonDocument respDoc;
+        QString signalErr;
+        if (!signalRequest(postUrl, "POST", &req, &respDoc, &signalErr)) {
+            failReasons.push_back(server + ": " + (signalErr.isEmpty() ? QStringLiteral("unknown_error") : signalErr));
+            continue;
+        }
+
+        contact.signalServer = server;
+        signalServerByUserId_[contact.userId] = server;
+        signalWsUsers_.insert(contact.userId);
+        signalP2PUsers_.remove(contact.userId);
+        appendSignalOutgoingMessage(contact, text, timestampMs);
+        return true;
+    }
+
+    if (errorText != nullptr) {
+        *errorText = failReasons.isEmpty() ? QStringLiteral("所有信令服务器发送均失败") : failReasons.join(" | ");
+    }
+    return false;
 }
 
 void ChatWindow::appendSignalOutgoingMessage(Contact& contact, const QString& text, qint64 timestampMs) {
@@ -2604,7 +2891,8 @@ bool ChatWindow::signalRequest(const QString& url,
     timeout.setSingleShot(true);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-    timeout.start(3000);
+    const int timeoutMs = (methodUpper == "POST") ? 5000 : 3000;
+    timeout.start(timeoutMs);
     loop.exec();
 
     if (!reply->isFinished()) {
@@ -2701,7 +2989,7 @@ QString ChatWindow::presenceText(PresenceKind kind) const {
         case PresenceKind::SignalP2P:
             return "P2P在线";
         case PresenceKind::SignalWs:
-            return "WS在线";
+            return "中继在线";
         case PresenceKind::Offline:
         default:
             return "离线";

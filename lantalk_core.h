@@ -514,7 +514,10 @@ public:
         return getPeerSnapshot();
     }
 
-    bool sendTextToUserId(const std::string& userId, const std::string& text, std::string* errorOut = nullptr) {
+    bool sendTextToUserId(const std::string& userId,
+                          const std::string& text,
+                          std::string* errorOut = nullptr,
+                          int connectTimeoutMs = 3000) {
         Peer peer;
         if (!getPeerByUserId(userId, peer)) {
             if (errorOut != nullptr) {
@@ -529,7 +532,7 @@ public:
             return false;
         }
         std::string dialedIp;
-        if (!sendTextToPeer(peer, text, &dialedIp)) {
+        if (!sendTextToPeer(peer, text, &dialedIp, connectTimeoutMs)) {
             if (errorOut != nullptr) {
                 *errorOut = "消息发送失败。";
             }
@@ -616,7 +619,7 @@ public:
         peer.userId = safeUserId;
         peer.name = sanitizeHelloField(name.empty() ? safeUserId : name);
         peer.ip = safeIp;
-        peer.candidateIps = normalizeCandidateIps(safeIp, candidateIps);
+        peer.candidateIps = normalizeCandidateIps(safeIp, candidateIps, port);
         peer.avatarPayload = sanitizeHelloField(avatarPayload);
         peer.port = port;
         peer.e2eePublic = e2eePublic;
@@ -1214,9 +1217,9 @@ private:
                     peer.userId = peerUserId;
                     peer.name = peerName;
                     peer.ip = ipBuf;
-                    peer.candidateIps = normalizeCandidateIps(peer.ip, {});
-                    peer.avatarPayload = peerAvatarPayload;
                     peer.port = static_cast<uint16_t>(peerPort);
+                    peer.candidateIps = normalizeCandidateIps(peer.ip, {}, peer.port);
+                    peer.avatarPayload = peerAvatarPayload;
                     peer.e2eePublic = peerE2eePublic;
                     peer.lastSeen = std::chrono::steady_clock::now();
                     peers_[peerUserId] = peer;
@@ -1225,9 +1228,9 @@ private:
                     it->second.userId = peerUserId;
                     it->second.name = peerName;
                     it->second.ip = ipBuf;
-                    it->second.candidateIps = normalizeCandidateIps(it->second.ip, {});
-                    it->second.avatarPayload = peerAvatarPayload;
                     it->second.port = static_cast<uint16_t>(peerPort);
+                    it->second.candidateIps = normalizeCandidateIps(it->second.ip, {}, it->second.port);
+                    it->second.avatarPayload = peerAvatarPayload;
                     it->second.e2eePublic = peerE2eePublic;
                     it->second.lastSeen = std::chrono::steady_clock::now();
                 }
@@ -1442,7 +1445,10 @@ private:
         onIncomingFile(fromUserId, fromName, remoteIp, fileName, savePath, payloadLen, static_cast<std::time_t>(ts));
     }
 
-    bool sendTextToPeer(const Peer& peer, const std::string& text, std::string* connectedIpOut = nullptr) {
+    bool sendTextToPeer(const Peer& peer,
+                        const std::string& text,
+                        std::string* connectedIpOut = nullptr,
+                        int connectTimeoutMs = 3000) {
         if (text.empty() || text.size() > kMaxTextBytes) {
             return false;
         }
@@ -1450,7 +1456,8 @@ private:
             return false;
         }
 
-        socket_t sock = connectToPeer(peer, 3000, connectedIpOut);
+        const int timeoutMs = std::clamp(connectTimeoutMs, 200, 10000);
+        socket_t sock = connectToPeer(peer, timeoutMs, connectedIpOut);
         if (sock == kInvalidSocket) {
             return false;
         }
@@ -1544,8 +1551,13 @@ private:
     }
 
     socket_t connectToPeer(const Peer& peer, int timeoutMs, std::string* connectedIpOut = nullptr) {
-        const std::vector<std::string> dialIps = normalizeCandidateIps(peer.ip, peer.candidateIps);
-        for (const std::string& ip : dialIps) {
+        const std::vector<std::string> dialTargets = normalizeCandidateIps(peer.ip, peer.candidateIps, peer.port);
+        for (const std::string& target : dialTargets) {
+            std::string ip;
+            uint16_t port = peer.port;
+            if (!parseDialEndpoint(target, peer.port, ip, port) || port == 0) {
+                continue;
+            }
             socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             if (sock == kInvalidSocket) {
                 continue;
@@ -1553,7 +1565,7 @@ private:
 
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
-            addr.sin_port = htons(peer.port);
+            addr.sin_port = htons(port);
             if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
                 closeSocket(sock);
                 continue;
@@ -1598,36 +1610,79 @@ private:
                 continue;
             }
             if (connectedIpOut != nullptr) {
-                *connectedIpOut = ip;
+                *connectedIpOut = (port == peer.port) ? ip : (ip + ":" + std::to_string(port));
             }
             return sock;
         }
         return kInvalidSocket;
     }
 
+    bool parseDialEndpoint(const std::string& raw,
+                           uint16_t defaultPort,
+                           std::string& outIp,
+                           uint16_t& outPort) const {
+        std::string token = trim(raw);
+        if (token.empty()) {
+            return false;
+        }
+
+        uint16_t port = defaultPort;
+        std::string ip = token;
+        const size_t colon = token.rfind(':');
+        if (colon != std::string::npos && token.find(':') == colon) {
+            const std::string ipPart = trim(token.substr(0, colon));
+            const std::string portPart = trim(token.substr(colon + 1));
+            if (!ipPart.empty() && !portPart.empty()) {
+                int parsedPort = 0;
+                try {
+                    parsedPort = std::stoi(portPart);
+                } catch (...) {
+                    parsedPort = 0;
+                }
+                if (parsedPort <= 0 || parsedPort > 65535) {
+                    return false;
+                }
+                ip = ipPart;
+                port = static_cast<uint16_t>(parsedPort);
+            }
+        }
+
+        in_addr addr{};
+        if (inet_pton(AF_INET, ip.c_str(), &addr) <= 0) {
+            return false;
+        }
+
+        outIp = ip;
+        outPort = port;
+        return true;
+    }
+
     std::vector<std::string> normalizeCandidateIps(const std::string& primaryIp,
-                                                   const std::vector<std::string>& extras) const {
+                                                   const std::vector<std::string>& extras,
+                                                   uint16_t defaultPort = 0) const {
         std::vector<std::string> out;
         out.reserve(1 + extras.size());
         std::set<std::string> seen;
 
-        auto addIp = [&](const std::string& raw) {
-            const std::string ip = trim(raw);
-            if (ip.empty()) {
+        auto addTarget = [&](const std::string& raw) {
+            std::string ip;
+            uint16_t port = defaultPort;
+            if (!parseDialEndpoint(raw, defaultPort, ip, port)) {
                 return;
             }
-            in_addr addr{};
-            if (inet_pton(AF_INET, ip.c_str(), &addr) <= 0) {
-                return;
-            }
-            if (seen.insert(ip).second) {
-                out.push_back(ip);
+            const std::string key = ip + ":" + std::to_string(port);
+            if (seen.insert(key).second) {
+                if (port != 0 && defaultPort != 0 && port != defaultPort) {
+                    out.push_back(ip + ":" + std::to_string(port));
+                } else {
+                    out.push_back(ip);
+                }
             }
         };
 
-        addIp(primaryIp);
+        addTarget(primaryIp);
         for (const std::string& candidate : extras) {
-            addIp(candidate);
+            addTarget(candidate);
         }
         return out;
     }

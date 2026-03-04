@@ -96,6 +96,11 @@ private:
     void noteVerifiedSignalP2P(const QString& userId);
     bool hasRecentVerifiedSignalP2P(const QString& userId, qint64 nowMsValue) const;
     QJsonArray buildVerifiedSignalP2PPeers(qint64 nowMsValue) const;
+    bool trySendTextViaSignal(Contact& contact,
+                              const QString& text,
+                              const Config& cfg,
+                              qint64 timestampMs,
+                              QString* errorText);
     void appendSignalOutgoingMessage(Contact& contact, const QString& text, qint64 timestampMs);
     void rebuildContactList();
     void renderCurrentConversation();
@@ -176,6 +181,9 @@ private:
     QHash<QString, qint64> signalAfterByServer_;
     QHash<QString, QString> signalServerByUserId_;
     QHash<QString, qint64> verifiedSignalP2PAtMsByUserId_;
+    QHash<QString, qint64> lastSignalP2PProbeAtMsByUserId_;
+    QString cachedStunReflexiveEndpoint_;
+    qint64 cachedStunReflexiveAtMs_ = 0;
     QSet<QString> signalKnownUsers_;
     QSet<QString> signalP2PUsers_;
     QSet<QString> signalWsUsers_;
