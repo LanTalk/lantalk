@@ -48,11 +48,15 @@ if(WIN32)
   if(WINDEPLOYQT_EXECUTABLE)
     add_custom_command(TARGET lantalk POST_BUILD
       COMMAND "${WINDEPLOYQT_EXECUTABLE}"
+              --release
               --no-translations
-              --no-compiler-runtime
+              --compiler-runtime
               --dir "$<TARGET_FILE_DIR:lantalk>"
               "$<TARGET_FILE:lantalk>"
-      COMMENT "Deploying Qt dependencies beside lantalk.exe (without redist installers)"
+      COMMAND "${CMAKE_COMMAND}"
+              -DDEPLOY_DIR="$<TARGET_FILE_DIR:lantalk>"
+              -P "${CMAKE_SOURCE_DIR}/cmake/finalize_windows_runtime.cmake"
+      COMMENT "Deploying Qt/MSVC runtime beside lantalk.exe and stripping installer packages"
       VERBATIM
     )
   else()

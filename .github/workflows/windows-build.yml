@@ -45,9 +45,8 @@ jobs:
           } else {
             throw "lantalk.exe not found"
           }
-          # Do not let windeployqt drop VC redist installers into artifact.
-          # We copy exact CRT DLLs below.
-          & windeployqt --release --no-translations --no-compiler-runtime --dir out $exe
+          # Let windeployqt deploy runtime dependencies, then hard-strip installer packages below.
+          & windeployqt --release --no-translations --compiler-runtime --dir out $exe
           Copy-Item $exe "out/LanTalk.exe" -Force
 
           $requiredRuntime = @(
@@ -126,6 +125,16 @@ jobs:
           }
           if ($unexpectedInstallers.Count -gt 0) {
             throw "Unexpected runtime installer file remains in artifact."
+          }
+
+          # Smoke check: process must be launchable (missing DLL errors fail here).
+          $proc = Start-Process -FilePath (Resolve-Path "out/LanTalk.exe") -WorkingDirectory (Resolve-Path "out") -PassThru
+          Start-Sleep -Seconds 3
+          if ($proc.HasExited -and $proc.ExitCode -ne 0) {
+            throw "LanTalk failed smoke launch, exit code: $($proc.ExitCode)"
+          }
+          if (-not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force
           }
 
           @'
