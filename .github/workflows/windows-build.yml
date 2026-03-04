@@ -23,6 +23,11 @@ jobs:
           arch: "win64_msvc2019_64"
           aqtversion: "==3.2.*"
 
+      - name: Setup MSVC Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Configure (x64)
         run: cmake -S . -B build -A x64
 
@@ -56,9 +61,27 @@ jobs:
             $runtimeRoots += Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC143.CRT"
             $runtimeRoots += Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC142.CRT"
           }
-          $runtimeRoots += Get-ChildItem "$env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-          $runtimeRoots += Get-ChildItem "$env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($LASTEXITCODE -eq 0 -and $vsPath) {
+              $msvcRedistBase = Join-Path $vsPath "VC\Redist\MSVC"
+              if (Test-Path $msvcRedistBase) {
+                $runtimeRoots += Get-ChildItem "$msvcRedistBase\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object { $_.FullName }
+              }
+            }
+          }
           $runtimeRoots = $runtimeRoots | Select-Object -Unique
+
+          if (-not $runtimeRoots -or $runtimeRoots.Count -eq 0) {
+            throw "MSVC redist directory not found; cannot bundle compiler runtime."
+          }
+
+          foreach ($root in $runtimeRoots) {
+            Get-ChildItem (Join-Path $root "*.dll") -File -ErrorAction SilentlyContinue | ForEach-Object {
+              Copy-Item $_.FullName (Join-Path "out" $_.Name) -Force
+            }
+          }
 
           foreach ($dll in $requiredRuntime) {
             $target = Join-Path "out" $dll
