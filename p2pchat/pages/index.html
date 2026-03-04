@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LanTalk Web</title>
+  <link rel="stylesheet" href="https://registry.npmmirror.com/lxgw-wenkai-screen-web/latest/files/style.css" />
+  <link rel="icon" type="image/svg+xml" href="./app_icon.svg" />
+  <link rel="icon" type="image/png" sizes="32x32" href="./app_icon.png" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -24,8 +27,10 @@
 
     <main class="chat">
       <header class="chat-header">
-        <div id="chatTitle" class="chat-title">聊天窗口</div>
-        <button id="profileBtn" class="dots-btn" title="查看资料">•••</button>
+        <div class="chat-title-wrap">
+          <img class="web-logo" src="./app_icon.png" alt="LanTalk" />
+          <div id="chatTitle" class="chat-title">聊天窗口</div>
+        </div>
       </header>
 
       <section id="messages" class="messages"></section>
@@ -49,7 +54,6 @@
     <label>信令服务器（每行一个）
       <textarea id="serversInput" rows="4" placeholder="https://lantalk-signal.example.workers.dev"></textarea>
     </label>
-    <p class="hint">网页版不支持发送文件，仅支持文本与表情。</p>
     <div class="dialog-actions">
       <button id="cancelSettingsBtn">取消</button>
       <button id="saveSettingsBtn" class="primary">保存</button>

@@ -19,7 +19,10 @@ body {
   font-family: "LXGW WenKai Screen", "Microsoft YaHei", sans-serif;
   background: var(--bg-main);
   color: var(--text);
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
 }
+button, input, textarea { font-family: inherit; }
 
 .app-shell {
   width: 100vw;
@@ -47,13 +50,18 @@ body {
   border: 1px solid rgba(0, 0, 0, 0.08);
 }
 .icon-btn {
-  width: 36px;
-  height: 34px;
+  width: 42px;
+  height: 42px;
   border: none;
-  border-radius: 10px;
+  border-radius: 12px;
   background: transparent;
   color: #4b5563;
   cursor: pointer;
+  font-size: 24px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .icon-btn:hover { background: rgba(0, 0, 0, 0.06); }
 
@@ -105,17 +113,22 @@ body {
   border-bottom: 1px solid #dde2e9;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   padding: 0 14px 0 22px;
 }
-.chat-title { font-size: 30px; font-weight: 700; }
-.dots-btn {
-  border: none;
-  background: transparent;
-  font-size: 22px;
-  color: #111827;
-  cursor: pointer;
+.chat-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
 }
+.web-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  object-fit: cover;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+}
+.chat-title { font-size: 30px; font-weight: 700; }
 
 .messages {
   flex: 1;
@@ -191,7 +204,6 @@ body {
   padding: 8px;
   font: inherit;
 }
-.settings-dialog .hint { color: #6b7280; font-size: 12px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .dialog-actions button { min-width: 74px; height: 32px; border-radius: 8px; border: 1px solid #cfd6df; }
 .dialog-actions button.primary { border: none; background: #2563eb; color: #fff; }
