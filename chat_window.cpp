@@ -217,10 +217,10 @@ QIcon makeAppIcon() {
 
 constexpr char kBlobMagic[] = "LTC2";
 constexpr char kDefaultSignalServer[] = "https://lantalk-web.pages.dev";
-constexpr qint64 kSignalP2PVerifyTtlMs = 45 * 1000;
-constexpr qint64 kSignalP2PProbeCooldownMs = 20 * 1000;
+constexpr qint64 kSignalP2PVerifyTtlMs = 90 * 1000;
+constexpr qint64 kSignalP2PProbeCooldownMs = 4 * 1000;
 constexpr qint64 kSignalP2PProbeRecordTtlMs = 10 * 60 * 1000;
-constexpr int kSignalP2PProbeTimeoutMs = 450;
+constexpr int kSignalP2PProbeTimeoutMs = 1800;
 constexpr qint64 kStunRefreshMs = 60 * 1000;
 constexpr int kStunResponseTimeoutMs = 1200;
 

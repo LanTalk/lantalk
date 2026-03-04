@@ -1501,7 +1501,8 @@ private:
             return false;
         }
 
-        const int timeoutMs = std::clamp(connectTimeoutMs, 200, 10000);
+        // Keep a sane lower bound so Signal-assisted P2P probing does not timeout too aggressively on WAN links.
+        const int timeoutMs = std::clamp(connectTimeoutMs, 600, 10000);
         socket_t sock = connectToPeer(peer, timeoutMs, connectedIpOut, failReasonOut);
         if (sock == kInvalidSocket) {
             return false;
@@ -1778,11 +1779,50 @@ private:
     std::vector<std::string> normalizeCandidateIps(const std::string& primaryIp,
                                                    const std::vector<std::string>& extras,
                                                    uint16_t defaultPort = 0) const {
-        std::vector<std::string> out;
-        out.reserve(1 + extras.size());
-        std::set<std::string> seen;
+        struct DialTarget {
+            std::string text;
+            bool explicitPort = false;
+            bool privateOrSpecial = true;
+            size_t order = 0;
+            bool primary = false;
+        };
 
-        auto addTarget = [&](const std::string& raw) {
+        std::vector<DialTarget> targets;
+        targets.reserve(1 + extras.size());
+        std::set<std::string> seen;
+        size_t order = 0;
+
+        auto isPrivateOrSpecialIPv4 = [](const std::string& ip) {
+            in_addr addr{};
+            if (inet_pton(AF_INET, ip.c_str(), &addr) <= 0) {
+                return true;
+            }
+            const uint32_t host = ntohl(addr.S_un.S_addr);
+            const uint8_t a = static_cast<uint8_t>((host >> 24U) & 0xFFU);
+            const uint8_t b = static_cast<uint8_t>((host >> 16U) & 0xFFU);
+            // RFC1918 + loopback + link-local + CGNAT + unspecified/broadcast/multicast
+            if (a == 10U || a == 127U || a == 0U) {
+                return true;
+            }
+            if (a == 169U && b == 254U) {
+                return true;
+            }
+            if (a == 172U && b >= 16U && b <= 31U) {
+                return true;
+            }
+            if (a == 192U && b == 168U) {
+                return true;
+            }
+            if (a == 100U && b >= 64U && b <= 127U) {
+                return true;
+            }
+            if (a >= 224U) {
+                return true;
+            }
+            return false;
+        };
+
+        auto addTarget = [&](const std::string& raw, bool isPrimary) {
             std::string ip;
             uint16_t port = defaultPort;
             if (!parseDialEndpoint(raw, defaultPort, ip, port)) {
@@ -1790,17 +1830,39 @@ private:
             }
             const std::string key = ip + ":" + std::to_string(port);
             if (seen.insert(key).second) {
-                if (port != 0 && defaultPort != 0 && port != defaultPort) {
-                    out.push_back(ip + ":" + std::to_string(port));
-                } else {
-                    out.push_back(ip);
-                }
+                const bool explicitPort = (port != 0 && (defaultPort == 0 || port != defaultPort));
+                DialTarget target;
+                target.text = explicitPort ? (ip + ":" + std::to_string(port)) : ip;
+                target.explicitPort = explicitPort;
+                target.privateOrSpecial = isPrivateOrSpecialIPv4(ip);
+                target.order = order++;
+                target.primary = isPrimary;
+                targets.push_back(std::move(target));
             }
         };
 
-        addTarget(primaryIp);
+        addTarget(primaryIp, true);
         for (const std::string& candidate : extras) {
-            addTarget(candidate);
+            addTarget(candidate, false);
+        }
+
+        std::stable_sort(targets.begin(), targets.end(), [](const DialTarget& a, const DialTarget& b) {
+            if (a.explicitPort != b.explicitPort) {
+                return a.explicitPort && !b.explicitPort;
+            }
+            if (a.privateOrSpecial != b.privateOrSpecial) {
+                return !a.privateOrSpecial && b.privateOrSpecial;
+            }
+            if (a.primary != b.primary) {
+                return a.primary && !b.primary;
+            }
+            return a.order < b.order;
+        });
+
+        std::vector<std::string> out;
+        out.reserve(targets.size());
+        for (const DialTarget& target : targets) {
+            out.push_back(target.text);
         }
         return out;
     }
