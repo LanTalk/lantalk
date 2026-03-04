@@ -1710,12 +1710,23 @@ void ChatWindow::refreshSignalingPeers() {
                 const QString pubRaw = peerObj.value("e2eePublic").toVariant().toString();
                 const uint64_t pubKey = pubRaw.toULongLong(&okKey);
                 if (okPort && okKey && !ip.isEmpty()) {
+                    std::vector<std::string> candidateIps;
+                    const QJsonArray localCandidates = peerObj.value("localIps").toArray();
+                    candidateIps.reserve(static_cast<size_t>(localCandidates.size()));
+                    for (const QJsonValue& candidateValue : localCandidates) {
+                        const QString candidateIp = candidateValue.toString().trimmed();
+                        if (candidateIp.isEmpty()) {
+                            continue;
+                        }
+                        candidateIps.push_back(candidateIp.toStdString());
+                    }
                     app_.upsertSignalPeer(userId.toStdString(),
                                           contact.name.toStdString(),
                                           ip.toStdString(),
                                           safePort,
                                           pubKey,
-                                          contact.avatarPayload.toStdString());
+                                          contact.avatarPayload.toStdString(),
+                                          candidateIps);
                 }
             }
         }

@@ -187,6 +187,7 @@ export class SignalHub {
         name: peer.name,
         avatarPayload: peer.avatarPayload,
         ip: peer.ip,
+        localIps: peer.localIps || [],
         port: peer.listenPort,
         e2eePublic: peer.e2eePublic,
         mode: decideMode(self, peer),

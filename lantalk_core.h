@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -61,6 +62,7 @@ struct Peer {
     std::string userId;
     std::string name;
     std::string ip;
+    std::vector<std::string> candidateIps;
     std::string avatarPayload;
     uint16_t port = 0;
     uint64_t e2eePublic = 0;
@@ -526,17 +528,26 @@ public:
             }
             return false;
         }
-        if (!sendTextToPeer(peer, text)) {
+        std::string dialedIp;
+        if (!sendTextToPeer(peer, text, &dialedIp)) {
             if (errorOut != nullptr) {
                 *errorOut = "消息发送失败。";
             }
             return false;
         }
-        appendLog("OUT MSG to=" + peer.name + "(" + peer.ip + ") text=" + text);
+        if (!dialedIp.empty()) {
+            std::lock_guard<std::mutex> lock(peersMutex_);
+            auto it = peers_.find(peer.userId);
+            if (it != peers_.end()) {
+                it->second.ip = dialedIp;
+            }
+        }
+        const std::string logIp = dialedIp.empty() ? peer.ip : dialedIp;
+        appendLog("OUT MSG to=" + peer.name + "(" + logIp + ") text=" + text);
         MessageEvent event;
         event.peerUserId = peer.userId;
         event.peerName = peer.name;
-        event.peerIp = peer.ip;
+        event.peerIp = logIp;
         event.text = text;
         event.incoming = false;
         event.isFile = false;
@@ -559,17 +570,26 @@ public:
             }
             return false;
         }
-        if (!sendFileToPeer(peer, filePath)) {
+        std::string dialedIp;
+        if (!sendFileToPeer(peer, filePath, &dialedIp)) {
             if (errorOut != nullptr) {
                 *errorOut = "文件发送失败。";
             }
             return false;
         }
-        appendLog("OUT FILE to=" + peer.name + "(" + peer.ip + ") path=" + pathToUtf8(filePath));
+        if (!dialedIp.empty()) {
+            std::lock_guard<std::mutex> lock(peersMutex_);
+            auto it = peers_.find(peer.userId);
+            if (it != peers_.end()) {
+                it->second.ip = dialedIp;
+            }
+        }
+        const std::string logIp = dialedIp.empty() ? peer.ip : dialedIp;
+        appendLog("OUT FILE to=" + peer.name + "(" + logIp + ") path=" + pathToUtf8(filePath));
         MessageEvent event;
         event.peerUserId = peer.userId;
         event.peerName = peer.name;
-        event.peerIp = peer.ip;
+        event.peerIp = logIp;
         event.fileName = pathToUtf8(filePath.filename());
         event.filePath = pathToUtf8(filePath);
         event.incoming = false;
@@ -584,7 +604,8 @@ public:
                           const std::string& ip,
                           uint16_t port,
                           uint64_t e2eePublic,
-                          const std::string& avatarPayload) {
+                          const std::string& avatarPayload,
+                          const std::vector<std::string>& candidateIps = {}) {
         const std::string safeUserId = trim(userId);
         const std::string safeIp = trim(ip);
         if (safeUserId.empty() || safeIp.empty() || port == 0 || e2eePublic <= 1 || e2eePublic >= (kDhPrime - 1)) {
@@ -595,6 +616,7 @@ public:
         peer.userId = safeUserId;
         peer.name = sanitizeHelloField(name.empty() ? safeUserId : name);
         peer.ip = safeIp;
+        peer.candidateIps = normalizeCandidateIps(safeIp, candidateIps);
         peer.avatarPayload = sanitizeHelloField(avatarPayload);
         peer.port = port;
         peer.e2eePublic = e2eePublic;
@@ -1192,6 +1214,7 @@ private:
                     peer.userId = peerUserId;
                     peer.name = peerName;
                     peer.ip = ipBuf;
+                    peer.candidateIps = normalizeCandidateIps(peer.ip, {});
                     peer.avatarPayload = peerAvatarPayload;
                     peer.port = static_cast<uint16_t>(peerPort);
                     peer.e2eePublic = peerE2eePublic;
@@ -1202,6 +1225,7 @@ private:
                     it->second.userId = peerUserId;
                     it->second.name = peerName;
                     it->second.ip = ipBuf;
+                    it->second.candidateIps = normalizeCandidateIps(it->second.ip, {});
                     it->second.avatarPayload = peerAvatarPayload;
                     it->second.port = static_cast<uint16_t>(peerPort);
                     it->second.e2eePublic = peerE2eePublic;
@@ -1418,7 +1442,7 @@ private:
         onIncomingFile(fromUserId, fromName, remoteIp, fileName, savePath, payloadLen, static_cast<std::time_t>(ts));
     }
 
-    bool sendTextToPeer(const Peer& peer, const std::string& text) {
+    bool sendTextToPeer(const Peer& peer, const std::string& text, std::string* connectedIpOut = nullptr) {
         if (text.empty() || text.size() > kMaxTextBytes) {
             return false;
         }
@@ -1426,7 +1450,7 @@ private:
             return false;
         }
 
-        socket_t sock = connectToPeer(peer, 3000);
+        socket_t sock = connectToPeer(peer, 3000, connectedIpOut);
         if (sock == kInvalidSocket) {
             return false;
         }
@@ -1456,7 +1480,7 @@ private:
         return sendAll(sock, encrypted.data(), encrypted.size());
     }
 
-    bool sendFileToPeer(const Peer& peer, const fs::path& filePath) {
+    bool sendFileToPeer(const Peer& peer, const fs::path& filePath, std::string* connectedIpOut = nullptr) {
         std::error_code ec;
         const uint64_t fileSize = fs::file_size(filePath, ec);
         if (ec || fileSize == 0 || fileSize > kMaxFileBytes) {
@@ -1474,7 +1498,7 @@ private:
         std::string fileName = pathToUtf8(filePath.filename());
         fileName = sanitizeFileName(fileName);
 
-        socket_t sock = connectToPeer(peer, 5000);
+        socket_t sock = connectToPeer(peer, 5000, connectedIpOut);
         if (sock == kInvalidSocket) {
             return false;
         }
@@ -1519,60 +1543,93 @@ private:
         return true;
     }
 
-    socket_t connectToPeer(const Peer& peer, int timeoutMs) {
-        socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (sock == kInvalidSocket) {
-            return kInvalidSocket;
-        }
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(peer.port);
-        if (inet_pton(AF_INET, peer.ip.c_str(), &addr.sin_addr) <= 0) {
-            closeSocket(sock);
-            return kInvalidSocket;
-        }
-
-        if (!setNonBlocking(sock, true)) {
-            closeSocket(sock);
-            return kInvalidSocket;
-        }
-
-        int rc = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-        if (rc != 0) {
-            const int err = getSocketError();
-            if (!isConnectInProgress(err)) {
-                closeSocket(sock);
-                return kInvalidSocket;
+    socket_t connectToPeer(const Peer& peer, int timeoutMs, std::string* connectedIpOut = nullptr) {
+        const std::vector<std::string> dialIps = normalizeCandidateIps(peer.ip, peer.candidateIps);
+        for (const std::string& ip : dialIps) {
+            socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (sock == kInvalidSocket) {
+                continue;
             }
 
-            fd_set writeSet;
-            FD_ZERO(&writeSet);
-            FD_SET(sock, &writeSet);
-            timeval tv{};
-            tv.tv_sec = timeoutMs / 1000;
-            tv.tv_usec = (timeoutMs % 1000) * 1000;
-            rc = select(0, nullptr, &writeSet, nullptr, &tv);
-
-            if (rc <= 0) {
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(peer.port);
+            if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
                 closeSocket(sock);
-                return kInvalidSocket;
+                continue;
             }
 
-            int soError = 0;
-            int soLen = sizeof(soError);
-
-            if (getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &soLen) != 0 || soError != 0) {
+            if (!setNonBlocking(sock, true)) {
                 closeSocket(sock);
-                return kInvalidSocket;
+                continue;
             }
-        }
 
-        if (!setNonBlocking(sock, false)) {
-            closeSocket(sock);
-            return kInvalidSocket;
+            int rc = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+            if (rc != 0) {
+                const int err = getSocketError();
+                if (!isConnectInProgress(err)) {
+                    closeSocket(sock);
+                    continue;
+                }
+
+                fd_set writeSet;
+                FD_ZERO(&writeSet);
+                FD_SET(sock, &writeSet);
+                timeval tv{};
+                tv.tv_sec = timeoutMs / 1000;
+                tv.tv_usec = (timeoutMs % 1000) * 1000;
+                rc = select(0, nullptr, &writeSet, nullptr, &tv);
+
+                if (rc <= 0) {
+                    closeSocket(sock);
+                    continue;
+                }
+
+                int soError = 0;
+                int soLen = sizeof(soError);
+                if (getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &soLen) != 0 || soError != 0) {
+                    closeSocket(sock);
+                    continue;
+                }
+            }
+
+            if (!setNonBlocking(sock, false)) {
+                closeSocket(sock);
+                continue;
+            }
+            if (connectedIpOut != nullptr) {
+                *connectedIpOut = ip;
+            }
+            return sock;
         }
-        return sock;
+        return kInvalidSocket;
+    }
+
+    std::vector<std::string> normalizeCandidateIps(const std::string& primaryIp,
+                                                   const std::vector<std::string>& extras) const {
+        std::vector<std::string> out;
+        out.reserve(1 + extras.size());
+        std::set<std::string> seen;
+
+        auto addIp = [&](const std::string& raw) {
+            const std::string ip = trim(raw);
+            if (ip.empty()) {
+                return;
+            }
+            in_addr addr{};
+            if (inet_pton(AF_INET, ip.c_str(), &addr) <= 0) {
+                return;
+            }
+            if (seen.insert(ip).second) {
+                out.push_back(ip);
+            }
+        };
+
+        addIp(primaryIp);
+        for (const std::string& candidate : extras) {
+            addIp(candidate);
+        }
+        return out;
     }
 
     bool sendHeader(socket_t sock,
