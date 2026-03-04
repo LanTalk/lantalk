@@ -14,6 +14,7 @@
 }
 
 * { box-sizing: border-box; }
+html { font-size: 15px; }
 body {
   margin: 0;
   font-family: "LXGW WenKai Screen", "Microsoft YaHei", sans-serif;
@@ -79,6 +80,7 @@ button, input, textarea { font-family: inherit; }
   border-radius: 8px;
   background: #eef1f5;
   padding: 0 10px;
+  font-size: 0.95rem;
 }
 
 .contact-list { flex: 1; overflow: auto; padding: 2px 6px 8px; }
@@ -99,7 +101,7 @@ button, input, textarea { font-family: inherit; }
   object-fit: cover;
 }
 .name-wrap { display: flex; flex-direction: column; }
-.name-line { font-size: 15px; display: flex; align-items: center; gap: 6px; }
+.name-line { font-size: 0.96rem; display: flex; align-items: center; gap: 6px; }
 .meta-line { font-size: 12px; color: var(--muted); }
 .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
 .dot.green { background: var(--green); }
@@ -116,19 +118,7 @@ button, input, textarea { font-family: inherit; }
   justify-content: flex-start;
   padding: 0 14px 0 22px;
 }
-.chat-title-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-}
-.web-logo {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  object-fit: cover;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
-}
-.chat-title { font-size: 30px; font-weight: 700; }
+.chat-title { font-size: 1.46rem; font-weight: 700; letter-spacing: 0.01em; }
 
 .messages {
   flex: 1;
@@ -138,7 +128,7 @@ button, input, textarea { font-family: inherit; }
 }
 .msg-row { margin-bottom: 8px; }
 .msg-meta {
-  font-size: 11px;
+  font-size: 0.8rem;
   color: var(--muted);
   margin-bottom: 3px;
 }
@@ -149,7 +139,8 @@ button, input, textarea { font-family: inherit; }
   max-width: min(66%, 760px);
   border-radius: 12px;
   padding: 8px 10px;
-  line-height: 1.58;
+  line-height: 1.6;
+  font-size: 0.97rem;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -164,7 +155,8 @@ button, input, textarea { font-family: inherit; }
   border: none;
   border-radius: 8px;
   background: transparent;
-  font-size: 20px;
+  font-size: 1.26rem;
+  cursor: pointer;
 }
 .tool-btn:hover { background: rgba(0,0,0,0.07); }
 .input-row { display: flex; gap: 8px; align-items: flex-end; }
@@ -176,6 +168,8 @@ button, input, textarea { font-family: inherit; }
   resize: none;
   outline: none;
   font: inherit;
+  font-size: 0.98rem;
+  line-height: 1.52;
 }
 .send-btn {
   width: 82px;
@@ -185,6 +179,7 @@ button, input, textarea { font-family: inherit; }
   background: var(--send);
   color: #fff;
   font-weight: 700;
+  font-size: 0.9rem;
   cursor: pointer;
 }
 
@@ -194,7 +189,8 @@ button, input, textarea { font-family: inherit; }
   width: 420px;
   padding: 14px;
 }
-.settings-dialog label { display: block; font-size: 14px; margin: 10px 0; }
+.settings-dialog h3 { margin: 2px 0 8px; font-size: 1.08rem; }
+.settings-dialog label { display: block; font-size: 0.94rem; margin: 10px 0; }
 .settings-dialog input,
 .settings-dialog textarea {
   margin-top: 6px;
@@ -207,3 +203,33 @@ button, input, textarea { font-family: inherit; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .dialog-actions button { min-width: 74px; height: 32px; border-radius: 8px; border: 1px solid #cfd6df; }
 .dialog-actions button.primary { border: none; background: #2563eb; color: #fff; }
+
+.emoji-pop {
+  position: fixed;
+  z-index: 9999;
+  width: 276px;
+  background: #ffffff;
+  border: 1px solid #d6dde7;
+  border-radius: 12px;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.18);
+  padding: 10px;
+}
+.emoji-head {
+  font-size: 0.86rem;
+  color: #6b7280;
+  margin-bottom: 7px;
+}
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 4px;
+}
+.emoji-cell {
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 1rem;
+  cursor: pointer;
+}
+.emoji-cell:hover { background: #eef2f7; }

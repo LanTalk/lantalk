@@ -4,6 +4,7 @@ const chatTitle = document.getElementById("chatTitle");
 const messages = document.getElementById("messages");
 const inputBox = document.getElementById("inputBox");
 const sendBtn = document.getElementById("sendBtn");
+const emojiBtn = document.getElementById("emojiBtn");
 const searchInput = document.getElementById("searchInput");
 
 const settingsDialog = document.getElementById("settingsDialog");
@@ -246,6 +247,73 @@ function ensureContact(userId) {
     });
   }
   return state.contacts.get(userId);
+}
+
+const EMOJIS = [
+  "😀", "😁", "😂", "🤣", "😅", "😊", "🙂", "😉",
+  "😍", "😘", "😎", "🤔", "🤗", "🙃", "😴", "😭",
+  "😤", "😡", "🤯", "🥳", "👍", "👎", "👏", "🙏",
+  "👋", "🤝", "💪", "🎉", "🎁", "✨", "🔥", "❤️",
+  "💯", "🌟", "✅", "❗", "❓", "😮", "🙌", "🤩",
+];
+
+let emojiPop = null;
+
+function insertAtCursor(text) {
+  const start = inputBox.selectionStart ?? inputBox.value.length;
+  const end = inputBox.selectionEnd ?? inputBox.value.length;
+  const before = inputBox.value.slice(0, start);
+  const after = inputBox.value.slice(end);
+  inputBox.value = `${before}${text}${after}`;
+  const next = start + text.length;
+  inputBox.selectionStart = next;
+  inputBox.selectionEnd = next;
+  inputBox.focus();
+}
+
+function closeEmojiPop() {
+  if (emojiPop) {
+    emojiPop.remove();
+    emojiPop = null;
+  }
+}
+
+function openEmojiPop() {
+  closeEmojiPop();
+  const pop = document.createElement("div");
+  pop.className = "emoji-pop";
+  pop.innerHTML = `
+    <div class="emoji-head">常用表情</div>
+    <div class="emoji-grid"></div>
+  `;
+
+  const grid = pop.querySelector(".emoji-grid");
+  for (const emoji of EMOJIS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "emoji-cell";
+    btn.textContent = emoji;
+    btn.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      insertAtCursor(emoji);
+      closeEmojiPop();
+    };
+    grid.appendChild(btn);
+  }
+
+  pop.addEventListener("click", (ev) => ev.stopPropagation());
+  document.body.appendChild(pop);
+  emojiPop = pop;
+
+  const rect = emojiBtn.getBoundingClientRect();
+  const left = Math.min(window.innerWidth - pop.offsetWidth - 12, Math.max(12, rect.left));
+  let top = rect.top - pop.offsetHeight - 8;
+  if (top < 12) {
+    top = rect.bottom + 8;
+  }
+  pop.style.left = `${left}px`;
+  pop.style.top = `${top}px`;
 }
 
 function pruneEphemeralOfflineContacts() {
@@ -518,12 +586,25 @@ saveSettingsBtn.onclick = () => {
 sendBtn.onclick = () => {
   sendMessage().catch((e) => alert(`发送失败: ${e.message}`));
 };
+if (emojiBtn) {
+  emojiBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (emojiPop) {
+      closeEmojiPop();
+    } else {
+      openEmojiPop();
+    }
+  };
+}
 inputBox.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendMessage().catch((err) => alert(`发送失败: ${err.message}`));
   }
 });
+document.addEventListener("click", () => closeEmojiPop());
+window.addEventListener("resize", () => closeEmojiPop());
 searchInput.addEventListener("input", renderContacts);
 
 selfAvatar.src = avatarPayloadToSrc(state.config.avatar, state.config.userId);

@@ -2010,11 +2010,8 @@ void ChatWindow::rebuildContactList() {
 
     if (activeRow >= 0) {
         contactList_->setCurrentRow(activeRow);
-    } else if (contactList_->count() > 0) {
-        contactList_->setCurrentRow(0);
-        activeContactId_ = contactList_->item(0)->data(Qt::UserRole).toString();
     } else {
-        activeContactId_.clear();
+        contactList_->setCurrentItem(nullptr);
     }
 }
 
