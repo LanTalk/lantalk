@@ -2769,6 +2769,18 @@ QByteArray ChatWindow::buildAvatarPayload(const QString& avatarPath) const {
     }
 
     const int maxPayloadChars = static_cast<int>(kMaxAvatarPayloadBytes > 64 ? (kMaxAvatarPayloadBytes - 64) : kMaxAvatarPayloadBytes);
+    const int maxRawBytes = (maxPayloadChars * 3) / 4;
+
+    // Prefer the original avatar bytes when size allows.
+    if (!avatarPath.isEmpty() && !image.isNull()) {
+        QFile rawFile(avatarPath);
+        if (rawFile.open(QIODevice::ReadOnly)) {
+            const QByteArray raw = rawFile.readAll();
+            if (!raw.isEmpty() && raw.size() <= maxRawBytes) {
+                return raw.toBase64();
+            }
+        }
+    }
     const std::vector<std::pair<int, int>> attempts = {
         {128, 90}, {112, 88}, {96, 86}, {88, 84}, {80, 82}, {72, 80}, {64, 76}, {56, 72}, {48, 68}, {40, 62}};
 

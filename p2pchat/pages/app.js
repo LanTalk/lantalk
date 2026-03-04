@@ -93,6 +93,25 @@ function isLikelyBase64Payload(text) {
   return /^[A-Za-z0-9+/]+={0,2}$/.test(raw);
 }
 
+function detectPayloadMimeFromBase64(raw) {
+  try {
+    const bytes = atob(String(raw || "").replace(/\s+/g, "")).slice(0, 16);
+    if (!bytes || bytes.length < 4) return "image/jpeg";
+    const b0 = bytes.charCodeAt(0) & 0xff;
+    const b1 = bytes.charCodeAt(1) & 0xff;
+    const b2 = bytes.charCodeAt(2) & 0xff;
+    const b3 = bytes.charCodeAt(3) & 0xff;
+    if (b0 === 0xff && b1 === 0xd8 && b2 === 0xff) return "image/jpeg";
+    if (b0 === 0x89 && b1 === 0x50 && b2 === 0x4e && b3 === 0x47) return "image/png";
+    if (b0 === 0x47 && b1 === 0x49 && b2 === 0x46 && b3 === 0x38) return "image/gif";
+    if (b0 === 0x42 && b1 === 0x4d) return "image/bmp";
+    if (bytes.startsWith("RIFF") && bytes.slice(8, 12) === "WEBP") return "image/webp";
+  } catch {
+    // ignore and fallback
+  }
+  return "image/jpeg";
+}
+
 function avatarPayloadToSrc(value, fallbackSeed = "") {
   const raw = String(value || "").trim();
   const fallback = stableFallbackAvatar(fallbackSeed || state.config.userId || state.config.name || "avatar");
@@ -102,7 +121,11 @@ function avatarPayloadToSrc(value, fallbackSeed = "") {
   if (raw.startsWith("/avatars/") || raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("blob:")) {
     return raw;
   }
-  if (isLikelyBase64Payload(raw)) return `data:image/jpeg;base64,${raw.replace(/\s+/g, "")}`;
+  if (isLikelyBase64Payload(raw)) {
+    const clean = raw.replace(/\s+/g, "");
+    const mime = detectPayloadMimeFromBase64(clean);
+    return `data:${mime};base64,${clean}`;
+  }
   return fallback;
 }
 
@@ -120,14 +143,42 @@ function encodeAvatarPayloadFromImage(image, size, quality) {
   return comma > 0 ? dataUrl.slice(comma + 1) : "";
 }
 
+function uint8ToBase64(bytes) {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
 async function buildAvatarPayloadFromSrc(src) {
+  const maxPayloadLen = 32000;
+  try {
+    const response = await fetch(src, { cache: "force-cache" });
+    if (response.ok) {
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (contentType.startsWith("image/")) {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.length > 0) {
+          const rawPayload = uint8ToBase64(bytes);
+          if (rawPayload && rawPayload.length <= maxPayloadLen) {
+            return rawPayload;
+          }
+        }
+      }
+    }
+  } catch {
+    // Fallback to re-encode path when direct fetch is blocked.
+  }
+
   const image = await new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error("avatar_load_failed"));
     img.src = src;
   });
-  const maxPayloadLen = 7800;
   const attempts = [
     [128, 0.9],
     [112, 0.88],

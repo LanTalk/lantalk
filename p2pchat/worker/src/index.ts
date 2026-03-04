@@ -27,6 +27,7 @@ type RelayMessage = {
 
 const PEER_TTL_MS = 15_000;
 const MAX_PULL_MESSAGES = 200;
+const MAX_AVATAR_PAYLOAD_CHARS = 32_768;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -158,7 +159,7 @@ export class SignalHub {
     const peer: PresenceRecord = {
       userId,
       name: String(body.name || userId).trim().slice(0, 128) || userId,
-      avatarPayload: String(body.avatarPayload || "").slice(0, 8192),
+      avatarPayload: String(body.avatarPayload || "").slice(0, MAX_AVATAR_PAYLOAD_CHARS),
       ip,
       listenPort: Number.isFinite(listenPort) ? listenPort : 0,
       e2eePublic,
@@ -211,7 +212,7 @@ export class SignalHub {
       id: crypto.randomUUID(),
       fromUserId,
       fromName: String(body.fromName || fromUserId).trim().slice(0, 128),
-      fromAvatar: String(body.fromAvatar || "").slice(0, 8192),
+      fromAvatar: String(body.fromAvatar || "").slice(0, MAX_AVATAR_PAYLOAD_CHARS),
       toUserId,
       text: text.slice(0, 16 * 1024),
       timestampMs: Number.isFinite(timestampMs) ? timestampMs : Date.now(),

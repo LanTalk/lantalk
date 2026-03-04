@@ -40,7 +40,7 @@ constexpr int kHeartbeatSeconds = 3;
 constexpr int kPeerTimeoutSeconds = 12;
 constexpr uint64_t kMaxTextBytes = 16 * 1024;
 constexpr uint64_t kMaxFileBytes = 1024ULL * 1024ULL * 1024ULL;
-constexpr size_t kMaxAvatarPayloadBytes = 8192;
+constexpr size_t kMaxAvatarPayloadBytes = 32768;
 constexpr uint64_t kDhPrime = 2305843009213693951ULL;
 constexpr uint64_t kDhGenerator = 5ULL;
 
@@ -1192,7 +1192,7 @@ private:
             sockaddr_in from{};
             int fromLen = sizeof(from);
 
-            char buffer[8192] = {0};
+            char buffer[65536] = {0};
             const int n = recvfrom(udpSock_, buffer, static_cast<int>(sizeof(buffer) - 1), 0,
                                    reinterpret_cast<sockaddr*>(&from), &fromLen);
             if (n <= 0) {
