@@ -276,8 +276,10 @@ function renderContacts() {
     if (keyword && !hay.includes(keyword)) continue;
     const el = document.createElement("div");
     el.className = `contact-item ${state.activeId === c.userId ? "active" : ""}`;
+    const avatarSrc = avatarPayloadToSrc(c.avatar, c.userId);
+    const avatarFallback = stableFallbackAvatar(c.userId);
     el.innerHTML = `
-      <img class="avatar-sm" src="${avatarPayloadToSrc(c.avatar, c.userId)}" alt="avatar" />
+      <img class="avatar-sm" src="${avatarSrc}" alt="avatar" onerror="this.onerror=null;this.src='${avatarFallback}'" />
       <div class="name-wrap">
         <div class="name-line"><span>${escapeHtml(c.name)}</span><span class="dot ${c.status}"></span></div>
       </div>
@@ -307,15 +309,19 @@ function renderConversation() {
     const t = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(
       d.getHours()
     ).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const incomingAvatarSrc = avatarPayloadToSrc(c.avatar, c.userId);
+    const incomingAvatarFallback = stableFallbackAvatar(c.userId);
+    const selfAvatarSrc = avatarPayloadToSrc(state.config.avatar, state.config.userId);
+    const selfAvatarFallback = stableFallbackAvatar(state.config.userId);
 
     row.innerHTML = `
       <div class="msg-meta" style="text-align:${m.incoming ? "left" : "right"};padding:${
       m.incoming ? "0 0 0 42px" : "0 42px 0 0"
     }">${m.incoming ? escapeHtml(c.name) : "我"}  ${t}</div>
       <div class="msg-content ${m.incoming ? "in" : "out"}">
-        ${m.incoming ? `<img class="avatar-sm" src="${avatarPayloadToSrc(c.avatar, c.userId)}" alt="avatar" />` : ""}
+        ${m.incoming ? `<img class="avatar-sm" src="${incomingAvatarSrc}" alt="avatar" onerror="this.onerror=null;this.src='${incomingAvatarFallback}'" />` : ""}
         <div class="bubble ${m.incoming ? "in" : "out"}">${escapeHtml(m.text)}</div>
-        ${!m.incoming ? `<img class="avatar-sm" src="${avatarPayloadToSrc(state.config.avatar, state.config.userId)}" alt="avatar" />` : ""}
+        ${!m.incoming ? `<img class="avatar-sm" src="${selfAvatarSrc}" alt="avatar" onerror="this.onerror=null;this.src='${selfAvatarFallback}'" />` : ""}
       </div>
     `;
     messages.appendChild(row);
