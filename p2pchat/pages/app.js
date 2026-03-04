@@ -127,20 +127,26 @@ async function buildAvatarPayloadFromSrc(src) {
     img.onerror = () => reject(new Error("avatar_load_failed"));
     img.src = src;
   });
+  const maxPayloadLen = 7800;
   const attempts = [
-    [56, 0.68],
-    [56, 0.6],
-    [50, 0.58],
-    [46, 0.56],
-    [42, 0.54],
-    [38, 0.5],
+    [128, 0.9],
+    [112, 0.88],
+    [96, 0.86],
+    [88, 0.84],
+    [80, 0.82],
+    [72, 0.8],
+    [64, 0.76],
+    [56, 0.72],
+    [48, 0.68],
+    [40, 0.62],
+    [32, 0.56],
   ];
   let last = "";
   for (const [size, quality] of attempts) {
     const payload = encodeAvatarPayloadFromImage(image, size, quality);
     if (payload) {
       last = payload;
-      if (payload.length <= 3900) {
+      if (payload.length <= maxPayloadLen) {
         return payload;
       }
     }

@@ -2768,32 +2768,55 @@ QByteArray ChatWindow::buildAvatarPayload(const QString& avatarPath) const {
         image = makeDefaultAvatar(seed, 96).toImage();
     }
 
-    const int size = 56;
-    const QImage scaled = image.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-    if (scaled.isNull()) {
-        return {};
-    }
+    const int maxPayloadChars = static_cast<int>(kMaxAvatarPayloadBytes > 64 ? (kMaxAvatarPayloadBytes - 64) : kMaxAvatarPayloadBytes);
+    const std::vector<std::pair<int, int>> attempts = {
+        {128, 90}, {112, 88}, {96, 86}, {88, 84}, {80, 82}, {72, 80}, {64, 76}, {56, 72}, {48, 68}, {40, 62}};
 
-    QImage out(size, size, QImage::Format_RGB888);
-    out.fill(Qt::white);
-    {
-        QPainter painter(&out);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        QPainterPath clip;
-        clip.addRoundedRect(QRectF(0, 0, size, size), 14.0, 14.0);
-        painter.setClipPath(clip);
-        painter.drawImage(0, 0, scaled);
-    }
-
-    QByteArray bytes;
-    {
-        QBuffer buffer(&bytes);
-        buffer.open(QIODevice::WriteOnly);
-        if (!out.save(&buffer, "JPG", 68)) {
+    QByteArray bestPayload;
+    auto encodeAvatar = [&](int size, int quality) -> QByteArray {
+        const QImage scaled = image.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        if (scaled.isNull()) {
             return {};
         }
+
+        QImage out(size, size, QImage::Format_RGB888);
+        out.fill(Qt::white);
+        {
+            QPainter painter(&out);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            QPainterPath clip;
+            const qreal radius = std::max<qreal>(8.0, size * 0.25);
+            clip.addRoundedRect(QRectF(0, 0, size, size), radius, radius);
+            painter.setClipPath(clip);
+            painter.drawImage(0, 0, scaled);
+        }
+
+        QByteArray bytes;
+        QBuffer buffer(&bytes);
+        if (!buffer.open(QIODevice::WriteOnly)) {
+            return {};
+        }
+        if (!out.save(&buffer, "JPG", quality)) {
+            return {};
+        }
+        return bytes.toBase64();
+    };
+
+    for (const auto& [size, quality] : attempts) {
+        const QByteArray payload = encodeAvatar(size, quality);
+        if (payload.isEmpty()) {
+            continue;
+        }
+        bestPayload = payload;
+        if (payload.size() <= maxPayloadChars) {
+            return payload;
+        }
     }
-    return bytes.toBase64();
+
+    if (!bestPayload.isEmpty() && static_cast<size_t>(bestPayload.size()) <= kMaxAvatarPayloadBytes) {
+        return bestPayload;
+    }
+    return {};
 }
 
 void ChatWindow::syncLocalAvatarToNetwork() {

@@ -40,7 +40,7 @@ constexpr int kHeartbeatSeconds = 3;
 constexpr int kPeerTimeoutSeconds = 12;
 constexpr uint64_t kMaxTextBytes = 16 * 1024;
 constexpr uint64_t kMaxFileBytes = 1024ULL * 1024ULL * 1024ULL;
-constexpr size_t kMaxAvatarPayloadBytes = 4096;
+constexpr size_t kMaxAvatarPayloadBytes = 8192;
 constexpr uint64_t kDhPrime = 2305843009213693951ULL;
 constexpr uint64_t kDhGenerator = 5ULL;
 
@@ -99,6 +99,39 @@ public:
 inline int getSocketError() {
     return WSAGetLastError();
 
+}
+
+inline const char* socketErrorName(int err) {
+    switch (err) {
+        case WSAETIMEDOUT:
+            return "WSAETIMEDOUT";
+        case WSAECONNREFUSED:
+            return "WSAECONNREFUSED";
+        case WSAEHOSTUNREACH:
+            return "WSAEHOSTUNREACH";
+        case WSAENETUNREACH:
+            return "WSAENETUNREACH";
+        case WSAEADDRNOTAVAIL:
+            return "WSAEADDRNOTAVAIL";
+        case WSAEACCES:
+            return "WSAEACCES";
+        case WSAECONNRESET:
+            return "WSAECONNRESET";
+        case WSAEWOULDBLOCK:
+            return "WSAEWOULDBLOCK";
+        case WSAEINPROGRESS:
+            return "WSAEINPROGRESS";
+        case WSAEALREADY:
+            return "WSAEALREADY";
+        default:
+            return "WSA_ERROR";
+    }
+}
+
+inline std::string formatSocketError(int err) {
+    std::ostringstream oss;
+    oss << socketErrorName(err) << '(' << err << ')';
+    return oss.str();
 }
 
 inline void closeSocket(socket_t sock) {
@@ -532,9 +565,14 @@ public:
             return false;
         }
         std::string dialedIp;
-        if (!sendTextToPeer(peer, text, &dialedIp, connectTimeoutMs)) {
+        std::string dialFailure;
+        if (!sendTextToPeer(peer, text, &dialedIp, connectTimeoutMs, &dialFailure)) {
             if (errorOut != nullptr) {
-                *errorOut = "消息发送失败。";
+                if (dialFailure.empty()) {
+                    *errorOut = "消息发送失败。";
+                } else {
+                    *errorOut = "消息发送失败（" + dialFailure + "）。";
+                }
             }
             return false;
         }
@@ -1448,16 +1486,23 @@ private:
     bool sendTextToPeer(const Peer& peer,
                         const std::string& text,
                         std::string* connectedIpOut = nullptr,
-                        int connectTimeoutMs = 3000) {
+                        int connectTimeoutMs = 3000,
+                        std::string* failReasonOut = nullptr) {
         if (text.empty() || text.size() > kMaxTextBytes) {
+            if (failReasonOut != nullptr) {
+                *failReasonOut = "text_empty_or_too_large";
+            }
             return false;
         }
         if (peer.e2eePublic <= 1 || peer.e2eePublic >= (kDhPrime - 1)) {
+            if (failReasonOut != nullptr) {
+                *failReasonOut = "invalid_peer_key";
+            }
             return false;
         }
 
         const int timeoutMs = std::clamp(connectTimeoutMs, 200, 10000);
-        socket_t sock = connectToPeer(peer, timeoutMs, connectedIpOut);
+        socket_t sock = connectToPeer(peer, timeoutMs, connectedIpOut, failReasonOut);
         if (sock == kInvalidSocket) {
             return false;
         }
@@ -1475,16 +1520,31 @@ private:
                         static_cast<uint64_t>(text.size()),
                         ts,
                         config_.e2eePublic)) {
+            if (failReasonOut != nullptr) {
+                *failReasonOut = "send_header_failed";
+            }
             return false;
         }
         const uint64_t sharedSecret = modPowU64(peer.e2eePublic, config_.e2eePrivate, kDhPrime);
         if (sharedSecret <= 1) {
+            if (failReasonOut != nullptr) {
+                *failReasonOut = "invalid_shared_secret";
+            }
             return false;
         }
         std::string encrypted = text;
         CipherState cipher = initCipherState(buildCipherSeed(sharedSecret, config_.userId, peer.userId, PacketType::Text, ts));
         xorCipherInPlace(encrypted.data(), encrypted.size(), cipher);
-        return sendAll(sock, encrypted.data(), encrypted.size());
+        if (!sendAll(sock, encrypted.data(), encrypted.size())) {
+            if (failReasonOut != nullptr) {
+                *failReasonOut = "send_payload_failed";
+            }
+            return false;
+        }
+        if (failReasonOut != nullptr) {
+            failReasonOut->clear();
+        }
+        return true;
     }
 
     bool sendFileToPeer(const Peer& peer, const fs::path& filePath, std::string* connectedIpOut = nullptr) {
@@ -1550,16 +1610,38 @@ private:
         return true;
     }
 
-    socket_t connectToPeer(const Peer& peer, int timeoutMs, std::string* connectedIpOut = nullptr) {
+    socket_t connectToPeer(const Peer& peer,
+                           int timeoutMs,
+                           std::string* connectedIpOut = nullptr,
+                           std::string* failReasonOut = nullptr) {
         const std::vector<std::string> dialTargets = normalizeCandidateIps(peer.ip, peer.candidateIps, peer.port);
+        std::ostringstream targetsOss;
+        for (size_t i = 0; i < dialTargets.size(); ++i) {
+            if (i > 0) {
+                targetsOss << ',';
+            }
+            targetsOss << dialTargets[i];
+        }
+        appendLog("P2P DIAL begin peer=" + peer.name + " id=" + peer.userId +
+                  " timeoutMs=" + std::to_string(timeoutMs) +
+                  " targets=[" + targetsOss.str() + "]");
+
+        std::string lastFailure = "no_targets";
         for (const std::string& target : dialTargets) {
+            appendLog("P2P DIAL try peer=" + peer.userId + " target=" + target);
             std::string ip;
             uint16_t port = peer.port;
             if (!parseDialEndpoint(target, peer.port, ip, port) || port == 0) {
+                lastFailure = "invalid_target:" + target;
+                appendLog("P2P DIAL skip peer=" + peer.userId + " target=" + target + " reason=invalid_target");
                 continue;
             }
             socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             if (sock == kInvalidSocket) {
+                const int err = getSocketError();
+                lastFailure = "socket_create:" + formatSocketError(err);
+                appendLog("P2P DIAL fail peer=" + peer.userId + " target=" + ip + ":" + std::to_string(port) +
+                          " stage=socket_create err=" + formatSocketError(err));
                 continue;
             }
 
@@ -1568,11 +1650,18 @@ private:
             addr.sin_port = htons(port);
             if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
                 closeSocket(sock);
+                lastFailure = "invalid_ip:" + ip;
+                appendLog("P2P DIAL skip peer=" + peer.userId + " target=" + ip + ":" + std::to_string(port) +
+                          " reason=invalid_ip");
                 continue;
             }
 
             if (!setNonBlocking(sock, true)) {
+                const int err = getSocketError();
                 closeSocket(sock);
+                lastFailure = "set_non_blocking:" + formatSocketError(err);
+                appendLog("P2P DIAL fail peer=" + peer.userId + " target=" + ip + ":" + std::to_string(port) +
+                          " stage=set_non_blocking err=" + formatSocketError(err));
                 continue;
             }
 
@@ -1581,6 +1670,9 @@ private:
                 const int err = getSocketError();
                 if (!isConnectInProgress(err)) {
                     closeSocket(sock);
+                    lastFailure = "connect_immediate:" + formatSocketError(err);
+                    appendLog("P2P DIAL fail peer=" + peer.userId + " target=" + ip + ":" + std::to_string(port) +
+                              " stage=connect_immediate err=" + formatSocketError(err));
                     continue;
                 }
 
@@ -1593,6 +1685,16 @@ private:
                 rc = select(0, nullptr, &writeSet, nullptr, &tv);
 
                 if (rc <= 0) {
+                    if (rc == 0) {
+                        lastFailure = "connect_timeout";
+                        appendLog("P2P DIAL fail peer=" + peer.userId + " target=" + ip + ":" + std::to_string(port) +
+                                  " stage=connect_wait reason=timeout");
+                    } else {
+                        const int selectErr = getSocketError();
+                        lastFailure = "select_error:" + formatSocketError(selectErr);
+                        appendLog("P2P DIAL fail peer=" + peer.userId + " target=" + ip + ":" + std::to_string(port) +
+                                  " stage=connect_wait err=" + formatSocketError(selectErr));
+                    }
                     closeSocket(sock);
                     continue;
                 }
@@ -1600,19 +1702,35 @@ private:
                 int soError = 0;
                 int soLen = sizeof(soError);
                 if (getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &soLen) != 0 || soError != 0) {
+                    const int optErr = (soError != 0) ? soError : getSocketError();
+                    lastFailure = "connect_so_error:" + formatSocketError(optErr);
+                    appendLog("P2P DIAL fail peer=" + peer.userId + " target=" + ip + ":" + std::to_string(port) +
+                              " stage=so_error err=" + formatSocketError(optErr));
                     closeSocket(sock);
                     continue;
                 }
             }
 
             if (!setNonBlocking(sock, false)) {
+                const int err = getSocketError();
                 closeSocket(sock);
+                lastFailure = "restore_blocking:" + formatSocketError(err);
+                appendLog("P2P DIAL fail peer=" + peer.userId + " target=" + ip + ":" + std::to_string(port) +
+                          " stage=restore_blocking err=" + formatSocketError(err));
                 continue;
             }
             if (connectedIpOut != nullptr) {
                 *connectedIpOut = (port == peer.port) ? ip : (ip + ":" + std::to_string(port));
             }
+            appendLog("P2P DIAL success peer=" + peer.userId + " target=" + ip + ":" + std::to_string(port));
+            if (failReasonOut != nullptr) {
+                failReasonOut->clear();
+            }
             return sock;
+        }
+        appendLog("P2P DIAL fail_all peer=" + peer.userId + " reason=" + lastFailure);
+        if (failReasonOut != nullptr) {
+            *failReasonOut = lastFailure;
         }
         return kInvalidSocket;
     }
