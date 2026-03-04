@@ -29,6 +29,7 @@ const state = {
   activeId: "",
   pullAfter: new Map(),
   selfAvatarPayload: "",
+  selfAvatarPayloadKey: "",
 };
 
 function loadConfig() {
@@ -69,18 +70,53 @@ function randomClassicName() {
   return CLASSIC_NAMES[Math.floor(Math.random() * CLASSIC_NAMES.length)];
 }
 
-function isLikelyBase64Payload(text) {
-  if (!text || text.length < 64) return false;
-  return /^[A-Za-z0-9+/=]+$/.test(text);
+function hashText(value) {
+  let h = 2166136261 >>> 0;
+  const text = String(value || "");
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
 }
 
-function avatarPayloadToSrc(value) {
+function stableFallbackAvatar(seed) {
+  if (!AVATAR_POOL.length) return "";
+  const idx = hashText(seed) % AVATAR_POOL.length;
+  return AVATAR_POOL[idx];
+}
+
+function isLikelyBase64Payload(text) {
+  const raw = String(text || "").trim().replace(/\s+/g, "");
+  if (!raw || raw.length < 64 || raw.length % 4 !== 0) return false;
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(raw);
+}
+
+function avatarPayloadToSrc(value, fallbackSeed = "") {
   const raw = String(value || "").trim();
-  if (!raw) return randomAvatar();
+  const fallback = stableFallbackAvatar(fallbackSeed || state.config.userId || state.config.name || "avatar");
+  if (!raw) return fallback;
   if (raw.startsWith("data:image/")) return raw;
-  if (raw.startsWith("/") || raw.startsWith("http://") || raw.startsWith("https://")) return raw;
-  if (isLikelyBase64Payload(raw)) return `data:image/jpeg;base64,${raw}`;
-  return randomAvatar();
+  if (raw.startsWith(":/avatars/")) return raw.slice(1);
+  if (raw.startsWith("/avatars/") || raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("blob:")) {
+    return raw;
+  }
+  if (isLikelyBase64Payload(raw)) return `data:image/jpeg;base64,${raw.replace(/\s+/g, "")}`;
+  return fallback;
+}
+
+function encodeAvatarPayloadFromImage(image, size, quality) {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  const srcSize = Math.min(image.naturalWidth || image.width, image.naturalHeight || image.height);
+  const sx = Math.max(0, ((image.naturalWidth || image.width) - srcSize) / 2);
+  const sy = Math.max(0, ((image.naturalHeight || image.height) - srcSize) / 2);
+  ctx.drawImage(image, sx, sy, srcSize, srcSize, 0, 0, size, size);
+  const dataUrl = canvas.toDataURL("image/jpeg", quality);
+  const comma = dataUrl.indexOf(",");
+  return comma > 0 ? dataUrl.slice(comma + 1) : "";
 }
 
 async function buildAvatarPayloadFromSrc(src) {
@@ -90,46 +126,60 @@ async function buildAvatarPayloadFromSrc(src) {
     img.onerror = () => reject(new Error("avatar_load_failed"));
     img.src = src;
   });
-  const canvas = document.createElement("canvas");
-  canvas.width = 56;
-  canvas.height = 56;
-  const ctx = canvas.getContext("2d");
-  const srcSize = Math.min(image.naturalWidth || image.width, image.naturalHeight || image.height);
-  const sx = Math.max(0, ((image.naturalWidth || image.width) - srcSize) / 2);
-  const sy = Math.max(0, ((image.naturalHeight || image.height) - srcSize) / 2);
-  ctx.drawImage(image, sx, sy, srcSize, srcSize, 0, 0, 56, 56);
-  const dataUrl = canvas.toDataURL("image/jpeg", 0.68);
-  const comma = dataUrl.indexOf(",");
-  return comma > 0 ? dataUrl.slice(comma + 1) : "";
+  const attempts = [
+    [56, 0.68],
+    [56, 0.6],
+    [50, 0.58],
+    [46, 0.56],
+    [42, 0.54],
+    [38, 0.5],
+  ];
+  let last = "";
+  for (const [size, quality] of attempts) {
+    const payload = encodeAvatarPayloadFromImage(image, size, quality);
+    if (payload) {
+      last = payload;
+      if (payload.length <= 3900) {
+        return payload;
+      }
+    }
+  }
+  return last;
+}
+
+async function buildAvatarPayloadFromValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (raw.startsWith("data:image/")) return buildAvatarPayloadFromSrc(raw);
+  if (raw.startsWith(":/avatars/")) return buildAvatarPayloadFromSrc(raw.slice(1));
+  if (raw.startsWith("/avatars/") || raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("blob:")) {
+    return buildAvatarPayloadFromSrc(raw);
+  }
+  if (isLikelyBase64Payload(raw)) {
+    return buildAvatarPayloadFromSrc(`data:image/jpeg;base64,${raw.replace(/\s+/g, "")}`);
+  }
+  return buildAvatarPayloadFromSrc(raw);
 }
 
 async function ensureSelfAvatarPayload() {
-  if (state.selfAvatarPayload) return state.selfAvatarPayload;
   let avatar = String(state.config.avatar || "").trim();
   if (!avatar) {
-    avatar = randomAvatar();
+    avatar = stableFallbackAvatar(state.config.userId || state.config.name || "self");
     state.config.avatar = avatar;
     saveConfig();
   }
-
-  if (avatar.startsWith("data:image/")) {
-    const comma = avatar.indexOf(",");
-    state.selfAvatarPayload = comma > 0 ? avatar.slice(comma + 1) : "";
-    return state.selfAvatarPayload;
-  }
-  if (isLikelyBase64Payload(avatar)) {
-    state.selfAvatarPayload = avatar;
-    return state.selfAvatarPayload;
-  }
+  if (state.selfAvatarPayload && state.selfAvatarPayloadKey === avatar) return state.selfAvatarPayload;
 
   try {
-    state.selfAvatarPayload = await buildAvatarPayloadFromSrc(avatar);
+    state.selfAvatarPayload = await buildAvatarPayloadFromValue(avatar);
+    state.selfAvatarPayloadKey = avatar;
     return state.selfAvatarPayload;
   } catch {
-    state.config.avatar = randomAvatar();
+    state.config.avatar = stableFallbackAvatar(state.config.userId || state.config.name || "self");
     saveConfig();
-    selfAvatar.src = avatarPayloadToSrc(state.config.avatar);
-    state.selfAvatarPayload = await buildAvatarPayloadFromSrc(state.config.avatar);
+    selfAvatar.src = avatarPayloadToSrc(state.config.avatar, state.config.userId);
+    state.selfAvatarPayload = await buildAvatarPayloadFromValue(state.config.avatar);
+    state.selfAvatarPayloadKey = state.config.avatar;
     return state.selfAvatarPayload;
   }
 }
@@ -186,7 +236,7 @@ function ensureContact(userId) {
     state.contacts.set(userId, {
       userId,
       name: randomClassicName(),
-      avatar: randomAvatar(),
+      avatar: stableFallbackAvatar(userId),
       avatarPayload: "",
       status: "gray",
       modeText: "离线",
@@ -196,6 +246,20 @@ function ensureContact(userId) {
     });
   }
   return state.contacts.get(userId);
+}
+
+function pruneEphemeralOfflineContacts() {
+  let changed = false;
+  for (const [userId, contact] of state.contacts.entries()) {
+    if (contact.status === "gray" && (!contact.messages || contact.messages.length === 0)) {
+      state.contacts.delete(userId);
+      if (state.activeId === userId) {
+        state.activeId = "";
+      }
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function renderContacts() {
@@ -213,7 +277,7 @@ function renderContacts() {
     const el = document.createElement("div");
     el.className = `contact-item ${state.activeId === c.userId ? "active" : ""}`;
     el.innerHTML = `
-      <img class="avatar-sm" src="${c.avatar}" alt="avatar" />
+      <img class="avatar-sm" src="${avatarPayloadToSrc(c.avatar, c.userId)}" alt="avatar" />
       <div class="name-wrap">
         <div class="name-line"><span>${escapeHtml(c.name)}</span><span class="dot ${c.status}"></span></div>
       </div>
@@ -249,9 +313,9 @@ function renderConversation() {
       m.incoming ? "0 0 0 42px" : "0 42px 0 0"
     }">${m.incoming ? escapeHtml(c.name) : "我"}  ${t}</div>
       <div class="msg-content ${m.incoming ? "in" : "out"}">
-        ${m.incoming ? `<img class="avatar-sm" src="${c.avatar}" alt="avatar" />` : ""}
+        ${m.incoming ? `<img class="avatar-sm" src="${avatarPayloadToSrc(c.avatar, c.userId)}" alt="avatar" />` : ""}
         <div class="bubble ${m.incoming ? "in" : "out"}">${escapeHtml(m.text)}</div>
-        ${!m.incoming ? `<img class="avatar-sm" src="${avatarPayloadToSrc(state.config.avatar)}" alt="avatar" />` : ""}
+        ${!m.incoming ? `<img class="avatar-sm" src="${avatarPayloadToSrc(state.config.avatar, state.config.userId)}" alt="avatar" />` : ""}
       </div>
     `;
     messages.appendChild(row);
@@ -280,7 +344,12 @@ async function requestJson(url, method = "GET", body = null) {
 }
 
 async function refreshPresence() {
-  const selfPayload = await ensureSelfAvatarPayload();
+  let selfPayload = "";
+  try {
+    selfPayload = await ensureSelfAvatarPayload();
+  } catch {
+    selfPayload = "";
+  }
   const servers = state.config.servers;
   if (!servers.length) {
     for (const c of state.contacts.values()) {
@@ -288,7 +357,11 @@ async function refreshPresence() {
       c.modeText = "离线";
       c.server = "";
     }
+    const changed = pruneEphemeralOfflineContacts();
     renderContacts();
+    if (changed) {
+      renderConversation();
+    }
     return;
   }
 
@@ -319,7 +392,7 @@ async function refreshPresence() {
         const peerAvatarPayload = String(peer.avatarPayload || "").trim();
         if (peerAvatarPayload) {
           c.avatarPayload = peerAvatarPayload;
-          c.avatar = avatarPayloadToSrc(peerAvatarPayload);
+          c.avatar = avatarPayloadToSrc(peerAvatarPayload, userId);
         }
         c.lastSeenMs = now;
 
@@ -354,7 +427,11 @@ async function refreshPresence() {
     }
   }
 
+  const changed = pruneEphemeralOfflineContacts();
   renderContacts();
+  if (changed) {
+    renderConversation();
+  }
 }
 
 async function pullMessages() {
@@ -375,7 +452,7 @@ async function pullMessages() {
         const fromAvatarPayload = String(msg.fromAvatar || "").trim();
         if (fromAvatarPayload) {
           c.avatarPayload = fromAvatarPayload;
-          c.avatar = avatarPayloadToSrc(fromAvatarPayload);
+          c.avatar = avatarPayloadToSrc(fromAvatarPayload, fromUserId);
         }
         c.messages.push({ incoming: true, text, timestampMs: ts });
         c.lastSeenMs = Date.now();
@@ -425,6 +502,8 @@ cancelSettingsBtn.onclick = () => settingsDialog.close();
 saveSettingsBtn.onclick = () => {
   state.config.name = nameInput.value.trim() || state.config.name;
   state.config.servers = normalizeServers(serversInput.value.split(/\r?\n/));
+  state.selfAvatarPayload = "";
+  state.selfAvatarPayloadKey = "";
   saveConfig();
   settingsDialog.close();
 };
@@ -440,12 +519,16 @@ inputBox.addEventListener("keydown", (e) => {
 });
 searchInput.addEventListener("input", renderContacts);
 
-selfAvatar.src = avatarPayloadToSrc(state.config.avatar);
+selfAvatar.src = avatarPayloadToSrc(state.config.avatar, state.config.userId);
 renderContacts();
 renderConversation();
 ensureSelfAvatarPayload().then(() => {
   refreshPresence();
 });
-pullMessages();
-setInterval(refreshPresence, 3000);
-setInterval(pullMessages, 1200);
+pullMessages().catch(() => {});
+setInterval(() => {
+  refreshPresence().catch(() => {});
+}, 3000);
+setInterval(() => {
+  pullMessages().catch(() => {});
+}, 1200);
