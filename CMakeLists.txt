@@ -29,6 +29,37 @@ add_executable(lantalk WIN32
 target_link_libraries(lantalk PRIVATE Qt6::Widgets Qt6::Network ws2_32)
 target_compile_definitions(lantalk PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 
+# Produce a runnable app directory after local builds by deploying Qt + MSVC runtime
+# beside lantalk.exe. This avoids "msvcp140_1.dll missing" when running directly.
+if(WIN32)
+  get_target_property(_qt_qmake_exe Qt6::qmake IMPORTED_LOCATION)
+  if(_qt_qmake_exe)
+    get_filename_component(_qt_bin_dir "${_qt_qmake_exe}" DIRECTORY)
+    find_program(WINDEPLOYQT_EXECUTABLE
+      NAMES windeployqt windeployqt6
+      HINTS "${_qt_bin_dir}"
+      NO_DEFAULT_PATH
+    )
+    if(NOT WINDEPLOYQT_EXECUTABLE)
+      find_program(WINDEPLOYQT_EXECUTABLE NAMES windeployqt windeployqt6)
+    endif()
+  endif()
+
+  if(WINDEPLOYQT_EXECUTABLE)
+    add_custom_command(TARGET lantalk POST_BUILD
+      COMMAND "${WINDEPLOYQT_EXECUTABLE}"
+              --no-translations
+              --compiler-runtime
+              --dir "$<TARGET_FILE_DIR:lantalk>"
+              "$<TARGET_FILE:lantalk>"
+      COMMENT "Deploying Qt and MSVC runtime dependencies beside lantalk.exe"
+      VERBATIM
+    )
+  else()
+    message(WARNING "windeployqt not found; built executable may miss runtime dependencies.")
+  endif()
+endif()
+
 if(MSVC)
   target_compile_options(lantalk PRIVATE /W4 /permissive-)
   target_compile_options(lantalk PRIVATE $<$<CONFIG:Release>:/O2 /Oi /GL>)

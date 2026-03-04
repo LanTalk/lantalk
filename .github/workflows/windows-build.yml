@@ -43,6 +43,47 @@ jobs:
           & windeployqt --release --no-translations --compiler-runtime --dir out $exe
           Copy-Item $exe "out/LanTalk.exe" -Force
 
+          $requiredRuntime = @(
+            "msvcp140.dll",
+            "msvcp140_1.dll",
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+            "concrt140.dll"
+          )
+
+          $runtimeRoots = @()
+          if ($env:VCToolsRedistDir) {
+            $runtimeRoots += Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC143.CRT"
+            $runtimeRoots += Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC142.CRT"
+          }
+          $runtimeRoots += Get-ChildItem "$env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $runtimeRoots += Get-ChildItem "$env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $runtimeRoots = $runtimeRoots | Select-Object -Unique
+
+          foreach ($dll in $requiredRuntime) {
+            $target = Join-Path "out" $dll
+            if (Test-Path $target) {
+              continue
+            }
+            $copied = $false
+            foreach ($root in $runtimeRoots) {
+              $candidate = Join-Path $root $dll
+              if (Test-Path $candidate) {
+                Copy-Item $candidate $target -Force
+                $copied = $true
+                break
+              }
+            }
+            if (-not $copied -or -not (Test-Path $target)) {
+              throw "Missing runtime dependency: $dll"
+            }
+          }
+
+          @'
+          Run LanTalk.exe from this folder.
+          Do not move LanTalk.exe out by itself; runtime DLLs must stay beside it.
+          '@ | Set-Content -Path "out/README-runtime.txt" -Encoding UTF8
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
