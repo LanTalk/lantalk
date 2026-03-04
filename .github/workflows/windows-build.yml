@@ -45,7 +45,9 @@ jobs:
           } else {
             throw "lantalk.exe not found"
           }
-          & windeployqt --release --no-translations --compiler-runtime --dir out $exe
+          # Do not let windeployqt drop VC redist installers into artifact.
+          # We copy exact CRT DLLs below.
+          & windeployqt --release --no-translations --no-compiler-runtime --dir out $exe
           Copy-Item $exe "out/LanTalk.exe" -Force
 
           $requiredRuntime = @(
@@ -60,6 +62,12 @@ jobs:
           if ($env:VCToolsRedistDir) {
             $runtimeRoots += Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC143.CRT"
             $runtimeRoots += Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC142.CRT"
+          }
+          if ($env:VCToolsInstallDir) {
+            $toolsRedistBase = Join-Path $env:VCToolsInstallDir "..\..\..\Redist\MSVC"
+            if (Test-Path $toolsRedistBase) {
+              $runtimeRoots += Get-ChildItem "$toolsRedistBase\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object { $_.FullName }
+            }
           }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
           if (Test-Path $vswhere) {
@@ -97,9 +105,27 @@ jobs:
                 break
               }
             }
+            if (-not $copied -and $env:WINDIR) {
+              $sysCandidate = Join-Path $env:WINDIR ("System32\" + $dll)
+              if (Test-Path $sysCandidate) {
+                Copy-Item $sysCandidate $target -Force
+                $copied = $true
+              }
+            }
             if (-not $copied -or -not (Test-Path $target)) {
               throw "Missing runtime dependency: $dll"
             }
+          }
+
+          # Artifact must not contain runtime installers; keep only runtime DLLs.
+          Get-ChildItem out -File -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "^(vc_redist|vcredist).*\.(exe|msi)$"
+          } | Remove-Item -Force
+          $unexpectedInstallers = Get-ChildItem out -File -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "^(vc_redist|vcredist).*\.(exe|msi)$"
+          }
+          if ($unexpectedInstallers.Count -gt 0) {
+            throw "Unexpected runtime installer file remains in artifact."
           }
 
           @'
